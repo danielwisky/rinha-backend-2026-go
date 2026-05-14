@@ -54,7 +54,10 @@ var smokeReq = &domain.Request{
 }
 
 func TestVectorizeSmokePayload(t *testing.T) {
-	v := vz.Vectorize(smokeReq)
+	v, err := vz.Vectorize(smokeReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	t.Logf("vector: %v", v)
 
 	// [0] amount = 384.88/10000 = 0.038488
@@ -118,7 +121,10 @@ func TestVectorizeSmokePayload(t *testing.T) {
 func TestVectorizeNullLastTx(t *testing.T) {
 	req := *smokeReq
 	req.LastTx = nil
-	v := vz.Vectorize(&req)
+	v, err := vz.Vectorize(&req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if v[5] != -1 {
 		t.Errorf("[5] sentinel: got %f, want -1 when last_transaction is null", v[5])
 	}
@@ -130,7 +136,10 @@ func TestVectorizeNullLastTx(t *testing.T) {
 func TestVectorizeUnknownMerchant(t *testing.T) {
 	req := *smokeReq
 	req.Merchant.ID = "MERC-UNKNOWN"
-	v := vz.Vectorize(&req)
+	v, err := vz.Vectorize(&req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if v[11] != 1 {
 		t.Errorf("[11] unknown_merchant: got %f, want 1 when merchant not in known list", v[11])
 	}
@@ -139,16 +148,40 @@ func TestVectorizeUnknownMerchant(t *testing.T) {
 func TestVectorizeClamp(t *testing.T) {
 	req := *smokeReq
 	req.Transaction.Amount = 999999 // well above max
-	v := vz.Vectorize(&req)
+	v, err := vz.Vectorize(&req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if v[0] != 1.0 {
 		t.Errorf("[0] clamp: got %f, want 1.0 for huge amount", v[0])
+	}
+}
+
+func TestVectorizeInvalidTimestamp(t *testing.T) {
+	req := *smokeReq
+	req.Transaction.RequestedAt = "not-a-timestamp"
+	_, err := vz.Vectorize(&req)
+	if err == nil {
+		t.Error("expected error for invalid requested_at, got nil")
+	}
+}
+
+func TestVectorizeInvalidLastTxTimestamp(t *testing.T) {
+	req := *smokeReq
+	req.LastTx = &domain.LastTx{Timestamp: "bad", KmFromCurrent: 1.0}
+	_, err := vz.Vectorize(&req)
+	if err == nil {
+		t.Error("expected error for invalid last_transaction.timestamp, got nil")
 	}
 }
 
 func TestVectorizeUnknownMCC(t *testing.T) {
 	req := *smokeReq
 	req.Merchant.MCC = "9999" // not in mcc_risk.json
-	v := vz.Vectorize(&req)
+	v, err := vz.Vectorize(&req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !approx(v[12], 0.5) {
 		t.Errorf("[12] mcc_risk default: got %f, want 0.5", v[12])
 	}

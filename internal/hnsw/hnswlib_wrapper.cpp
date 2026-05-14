@@ -1,8 +1,11 @@
 #include "hnswlib/hnswlib.h"
 #include "hnswlib_wrapper.h"
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+
+static const size_t kMaxDim = 32;
 
 // --- float16 ↔ float32 conversion ---
 // All our values are in [-1, 1] — well within float16 precision.
@@ -63,16 +66,21 @@ static unsigned char*                    g_labels  = nullptr;  // 0=legit, 1=fra
 extern "C" {
 
 void hnsw_init(int dim, int max_elements, int M, int ef_construction) {
-    g_dim   = (size_t)dim;
-    g_space = new L2SpaceF16(g_dim);
-    g_index = new hnswlib::HierarchicalNSW<float>(
+    delete g_index;
+    delete g_space;
+    free(g_labels);
+    g_dim    = (size_t)dim;
+    assert(g_dim <= kMaxDim);
+    g_space  = new L2SpaceF16(g_dim);
+    g_index  = new hnswlib::HierarchicalNSW<float>(
         g_space, (size_t)max_elements, (size_t)M, (size_t)ef_construction);
     g_labels = (unsigned char*)calloc((size_t)max_elements, 1);
 }
 
 void hnsw_add(float* vec, int label, int id) {
     // Convert float32 → float16 before handing off to hnswlib
-    uint16_t f16[32];  // 32 is safe upper bound for dim
+    assert((size_t)id < g_index->max_elements_);
+    uint16_t f16[kMaxDim];
     for (size_t i = 0; i < g_dim; i++) {
         f16[i] = f32_to_f16(vec[i]);
     }
@@ -86,7 +94,7 @@ void hnsw_set_ef(int ef) {
 
 int hnsw_search(float* query, int k, unsigned char* out_labels) {
     // Convert query float32 → float16
-    uint16_t f16[32];
+    uint16_t f16[kMaxDim];
     for (size_t i = 0; i < g_dim; i++) {
         f16[i] = f32_to_f16(query[i]);
     }

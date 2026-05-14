@@ -46,8 +46,11 @@ type Response struct {
 }
 
 // NewResponse computes the fraud score from k-NN labels (0=legit, 1=fraud).
-// score = fraudCount/5; approved when score < 0.6 (i.e. ≤2 fraud neighbors).
+// score = fraudCount/k; approved when score < 0.6 (i.e. ≤2 fraud neighbors out of 5).
 func NewResponse(labels []uint8) Response {
+	if len(labels) == 0 {
+		return Response{Approved: false, FraudScore: 1.0}
+	}
 	fraudCount := 0
 	for _, l := range labels {
 		if l == 1 {

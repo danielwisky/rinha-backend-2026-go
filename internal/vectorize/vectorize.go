@@ -2,6 +2,7 @@ package vectorize
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
@@ -49,7 +50,8 @@ func NewVectorizer(dir string) (*Vectorizer, error) {
 }
 
 // Vectorize converts a Request into a 14-dimensional float32 vector.
-func (vz *Vectorizer) Vectorize(r *domain.Request) [14]float32 {
+// Returns an error if any timestamp field is not valid RFC3339.
+func (vz *Vectorizer) Vectorize(r *domain.Request) ([14]float32, error) {
 	var v [14]float32
 
 	// [0] amount
@@ -64,7 +66,10 @@ func (vz *Vectorizer) Vectorize(r *domain.Request) [14]float32 {
 	}
 
 	// Parse requested_at once for dims [3] and [4]
-	t, _ := time.Parse(time.RFC3339, r.Transaction.RequestedAt)
+	t, err := time.Parse(time.RFC3339, r.Transaction.RequestedAt)
+	if err != nil {
+		return v, fmt.Errorf("requested_at: %w", err)
+	}
 	t = t.UTC()
 
 	// [3] hour_of_day (0–23 → 0.0–1.0)
@@ -79,7 +84,10 @@ func (vz *Vectorizer) Vectorize(r *domain.Request) [14]float32 {
 		v[5] = -1
 		v[6] = -1
 	} else {
-		lastT, _ := time.Parse(time.RFC3339, r.LastTx.Timestamp)
+		lastT, err := time.Parse(time.RFC3339, r.LastTx.Timestamp)
+		if err != nil {
+			return v, fmt.Errorf("last_transaction.timestamp: %w", err)
+		}
 		minutes := t.Sub(lastT).Minutes()
 		v[5] = clamp(float32(minutes) / vz.cfg.MaxMinutes)
 		v[6] = clamp(float32(r.LastTx.KmFromCurrent) / vz.cfg.MaxKm)
@@ -122,7 +130,7 @@ func (vz *Vectorizer) Vectorize(r *domain.Request) [14]float32 {
 	// [13] merchant_avg_amount
 	v[13] = clamp(float32(r.Merchant.AvgAmount) / vz.cfg.MaxMerchantAvgAmount)
 
-	return v
+	return v, nil
 }
 
 func clamp(x float32) float32 {

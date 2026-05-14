@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"log"
 
 	"github.com/bytedance/sonic"
@@ -54,7 +53,11 @@ func (h *API) fraudScore(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	vec := h.vz.Vectorize(&req)
+	vec, err := h.vz.Vectorize(&req)
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		return
+	}
 
 	labels, err := h.store.Search(vec)
 	if err != nil {
@@ -65,8 +68,12 @@ func (h *API) fraudScore(ctx *fasthttp.RequestCtx) {
 
 	resp := domain.NewResponse(labels)
 
-	ctx.SetContentType("application/json")
-	if err := json.NewEncoder(ctx).Encode(resp); err != nil {
+	b, err := sonic.Marshal(resp)
+	if err != nil {
 		log.Printf("encode: %v", err)
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		return
 	}
+	ctx.SetContentType("application/json")
+	ctx.SetBody(b)
 }
