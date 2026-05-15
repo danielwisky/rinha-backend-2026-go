@@ -33,9 +33,12 @@ func NewHTTPClient(baseURL string) (*HTTPClient, error) {
 		client: &fasthttp.HostClient{
 			Addr:                host,
 			MaxConns:            512,
-			MaxIdleConnDuration: 90 * time.Second,
+			MaxIdleConnDuration: 60 * time.Second,
 			ReadTimeout:         2 * time.Second,
 			WriteTimeout:        1 * time.Second,
+			// /search is idempotent (pure read against the index); retry on
+			// transient pool-stale errors instead of bubbling them up as 500s.
+			RetryIf: func(*fasthttp.Request) bool { return true },
 		},
 	}, nil
 }

@@ -33,6 +33,7 @@ func main() {
 		Name:                  "api",
 		ReadTimeout:           5 * time.Second,
 		WriteTimeout:          5 * time.Second,
+		IdleTimeout:           120 * time.Second,
 		DisableKeepalive:      false,
 		TCPKeepalive:          true,
 		NoDefaultServerHeader: true,

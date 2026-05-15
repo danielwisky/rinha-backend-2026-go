@@ -41,6 +41,7 @@ func main() {
 		Name:                  "store",
 		ReadTimeout:           5 * time.Second,
 		WriteTimeout:          5 * time.Second,
+		IdleTimeout:           120 * time.Second,
 		TCPKeepalive:          true,
 		NoDefaultServerHeader: true,
 		NoDefaultDate:         true,
