@@ -19,9 +19,8 @@ services:
       - backend
 
   api1:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
+    image: danielwisky/rinha-2026-api:v1
+    platform: linux/amd64
     environment:
       STORE_URL: http://store:9990
       RESOURCES_PATH: /app/resources
@@ -36,9 +35,8 @@ services:
       - backend
 
   api2:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
+    image: danielwisky/rinha-2026-api:v1
+    platform: linux/amd64
     environment:
       STORE_URL: http://store:9990
       RESOURCES_PATH: /app/resources
@@ -53,11 +51,8 @@ services:
       - backend
 
   store:
-    build:
-      context: .
-      dockerfile: Dockerfile.store
-    volumes:
-      - ./resources/references.json.gz:/app/resources/references.json.gz:ro
+    image: danielwisky/rinha-2026-store:v2
+    platform: linux/amd64
     environment:
       REFS_PATH: /app/resources/references.json.gz
       EF_BUILD: "40"

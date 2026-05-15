@@ -1,3 +1,4 @@
 resources/references.json.gz
 api
 store
+.DS_Store

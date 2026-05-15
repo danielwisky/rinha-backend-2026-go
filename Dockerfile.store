@@ -10,5 +10,6 @@ FROM debian:bullseye-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/store ./store
+COPY resources/references.json.gz ./resources/references.json.gz
 EXPOSE 9990
 CMD ["./store"]
