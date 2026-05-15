@@ -1,0 +1,7 @@
+{
+  "participants": ["Daniel Wisky"],
+  "social": ["https://github.com/danielwisky"],
+  "source-code-repo": "https://github.com/danielwisky/rinha-backend-2026-go",
+  "stack": ["go", "fasthttp", "sonic", "hnswlib", "nginx"],
+  "open_to_work": false
+}
