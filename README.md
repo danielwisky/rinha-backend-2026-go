@@ -9,10 +9,9 @@ Recebe eventos de transação (valor, parcelamento, dados do cliente, estabeleci
 ## Arquitetura
 
 ```
-                        ┌────────────────────────────────────┐
-Client ──► nginx:9999 ──► api1:8080  ──┐                    │
-                       └──► api2:8080  ──► store:9990 (HNSW) │
-                        └────────────────────────────────────┘
+                        ┌──► api1:8080 ──┐
+Client ──► nginx:9999 ──┤                ├──► store:9990 (HNSW)
+                        └──► api2:8080 ──┘
 ```
 
 | Componente | Papel | Limite de recursos |
