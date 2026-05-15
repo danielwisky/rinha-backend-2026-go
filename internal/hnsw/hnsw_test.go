@@ -7,9 +7,9 @@ import (
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/hnsw"
 )
 
-// Verifica que float16 preserva precisão suficiente para o scoring de fraude.
-// Todos os valores do desafio estão em [-1, 1] — float16 tem ~3 casas decimais de precisão aqui.
-func TestFloat16RoundtripPrecision(t *testing.T) {
+// Verifica que int8 preserva precisão suficiente para o scoring de fraude.
+// Todos os valores do desafio estão em [-1, 1] — int8 (escala 127) tem ~0.008 de granularidade aqui.
+func TestInt8RoundtripPrecision(t *testing.T) {
 	// Vetor legit da spec
 	legitVec := []float32{0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1, -1, 0.0292, 0.15, 0, 1, 0, 0.15, 0.006}
 	// Vetor fraud da spec
@@ -53,9 +53,9 @@ func TestFloat16RoundtripPrecision(t *testing.T) {
 	}
 }
 
-func TestFloat16SentinelMinus1(t *testing.T) {
-	// Verifica que o valor sentinela -1 (last_tx nulo) sobrevive float16
-	// float16 representa -1.0 exatamente (sinal=1, exp=15, mant=0 → 0xBC00)
+func TestInt8SentinelMinus1(t *testing.T) {
+	// Verifica que o valor sentinela -1 (last_tx nulo) sobrevive int8
+	// int8 representa -1.0 como -127 (escala 127); preservado perfeitamente
 	hnsw.Init(14, 10, 2, 50)
 	v := []float32{0.5, 0.5, 0.5, 0.5, 0.5, -1, -1, 0.5, 0.5, 0, 1, 0, 0.5, 0.5}
 	hnsw.Add(v, 0, 0)

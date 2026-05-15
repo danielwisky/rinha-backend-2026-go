@@ -13,8 +13,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: "12MB"
+          cpus: "0.25"
+          memory: "8MB"
     networks:
       - backend
 
@@ -31,7 +31,7 @@ services:
       resources:
         limits:
           cpus: "0.20"
-          memory: "20MB"
+          memory: "16MB"
     networks:
       - backend
 
@@ -48,7 +48,7 @@ services:
       resources:
         limits:
           cpus: "0.20"
-          memory: "20MB"
+          memory: "16MB"
     networks:
       - backend
 
@@ -60,14 +60,13 @@ services:
       - ./resources/references.json.gz:/app/resources/references.json.gz:ro
     environment:
       REFS_PATH: /app/resources/references.json.gz
-      # EF_BUILD/EF_SEARCH override defaults (200) — lower for local dev, remove for competition
-      EF_BUILD: "20"
-      EF_SEARCH: "20"
+      EF_BUILD: "40"
+      EF_SEARCH: "40"
     deploy:
       resources:
         limits:
-          cpus: "0.55"
-          memory: "298MB"
+          cpus: "0.35"
+          memory: "310MB"
     networks:
       - backend
 

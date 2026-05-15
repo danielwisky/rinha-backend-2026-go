@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -27,7 +28,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Dim:         14,
-		MaxElements: 3_100_000,
+		MaxElements: 3_000_000,
 		M:           4,
 		EfBuild:     200,
 		EfSearch:    200,
@@ -51,6 +52,9 @@ func New(cfg Config) *Index {
 // Load streams reference vectors from a gzipped JSON file into the index.
 // Intended to run in a goroutine; sets Ready() = true when done.
 func (idx *Index) Load(path string) {
+	prevGC := debug.SetGCPercent(20)
+	defer debug.SetGCPercent(prevGC)
+
 	log.Printf("streaming %s into HNSW index (M=%d, ef_build=%d, float16)...", path, idx.cfg.M, idx.cfg.EfBuild)
 
 	f, err := os.Open(path)
@@ -70,7 +74,7 @@ func (idx *Index) Load(path string) {
 		label uint8
 	}
 
-	entryCh := make(chan entry, 2048)
+	entryCh := make(chan entry, 64)
 
 	// Producer: single goroutine decodes streaming JSON
 	go func() {
@@ -98,11 +102,9 @@ func (idx *Index) Load(path string) {
 		}
 	}()
 
-	// Workers: parallel insertion into hnswlib (thread-safe addPoint)
-	numWorkers := runtime.NumCPU()
-	if numWorkers > 6 {
-		numWorkers = 6
-	}
+	// Workers: parallel insertion into hnswlib (thread-safe addPoint).
+	// GOMAXPROCS=1 means only one P; keep workers low to minimize stacks.
+	numWorkers := 2
 
 	var (
 		total     atomic.Int64
@@ -124,6 +126,10 @@ func (idx *Index) Load(path string) {
 	wg.Wait()
 
 	hnsw.SetEf(idx.cfg.EfSearch)
+
+	runtime.GC()
+	debug.FreeOSMemory()
+
 	log.Printf("index ready: %d vectors, ef_search=%d", total.Load(), idx.cfg.EfSearch)
 	idx.ready.Store(true)
 }
