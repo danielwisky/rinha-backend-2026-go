@@ -1,9 +1,11 @@
 #include "hnswlib/hnswlib.h"
 #include "hnswlib_wrapper.h"
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <string>
 
 static const size_t kMaxDim = 32;
 
@@ -93,6 +95,56 @@ int hnsw_search(float* query, int k, unsigned char* out_labels) {
         result.pop();
     }
     return count;
+}
+
+int hnsw_save(const char* path) {
+    if (!g_index) return -1;
+    std::string base(path);
+    try {
+        g_index->saveIndex(base + ".graph");
+    } catch (...) {
+        return -1;
+    }
+    size_t n = g_index->cur_element_count;
+    FILE* f = fopen((base + ".labels").c_str(), "wb");
+    if (!f) return -1;
+    size_t w = fwrite(g_labels, 1, n, f);
+    fclose(f);
+    return (w == n) ? 0 : -1;
+}
+
+int hnsw_load(const char* path, int dim, int max_elements) {
+    std::string base(path);
+    delete g_index;
+    delete g_space;
+    free(g_labels);
+    g_index = nullptr;
+    g_space = nullptr;
+    g_labels = nullptr;
+
+    g_dim = (size_t)dim;
+    assert(g_dim <= kMaxDim);
+    g_space = new L2SpaceI8(g_dim);
+    try {
+        g_index = new hnswlib::HierarchicalNSW<float>(
+            g_space, base + ".graph", false, (size_t)max_elements);
+    } catch (...) {
+        delete g_space;
+        g_space = nullptr;
+        return -1;
+    }
+
+    size_t n = g_index->cur_element_count;
+    g_labels = (unsigned char*)calloc((size_t)max_elements, 1);
+    if (!g_labels) return -1;
+
+    FILE* f = fopen((base + ".labels").c_str(), "rb");
+    if (!f) return -1;
+    size_t r = fread(g_labels, 1, n, f);
+    fclose(f);
+    if (r != n) return -1;
+
+    return (int)n;
 }
 
 } // extern "C"

@@ -2,6 +2,7 @@ package hnsw_test
 
 import (
 	"math"
+	"path/filepath"
 	"testing"
 
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/hnsw"
@@ -67,6 +68,44 @@ func TestInt8SentinelMinus1(t *testing.T) {
 	}
 	if result[0] != 0 {
 		t.Errorf("expected label 0 (legit), got %d", result[0])
+	}
+}
+
+func TestSaveLoadRoundtrip(t *testing.T) {
+	// Build a small index, save, load into a fresh instance, verify search results match.
+	legitVec := []float32{0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1, -1, 0.0292, 0.15, 0, 1, 0, 0.15, 0.006}
+	fraudVec := []float32{0.9506, 0.8333, 1.0, 0.2174, 0.8333, -1, -1, 0.9523, 1.0, 0, 1, 1, 0.75, 0.0055}
+
+	hnsw.Init(14, 20, 4, 50)
+	for i := 0; i < 10; i++ {
+		hnsw.Add(legitVec, 0, i)
+	}
+	for i := 0; i < 10; i++ {
+		hnsw.Add(fraudVec, 1, 10+i)
+	}
+	hnsw.SetEf(50)
+
+	path := filepath.Join(t.TempDir(), "idx")
+	if err := hnsw.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	n, err := hnsw.Load(path, 14, 20)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if n != 20 {
+		t.Fatalf("expected 20 elements loaded, got %d", n)
+	}
+
+	labels := hnsw.Search(legitVec, 5)
+	if len(labels) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(labels))
+	}
+	for i, l := range labels {
+		if l != 0 {
+			t.Errorf("neighbor[%d]: expected legit(0), got fraud(1)", i)
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
 resources/references.json.gz
-api
-store
+/api
+/store
 .DS_Store

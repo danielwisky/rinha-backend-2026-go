@@ -5,7 +5,16 @@ package hnsw
 // #include "hnswlib_wrapper.h"
 // #include <stdlib.h>
 import "C"
-import "unsafe"
+
+import (
+	"errors"
+	"unsafe"
+)
+
+var (
+	errSaveFailed = errors.New("hnsw: save failed")
+	errLoadFailed = errors.New("hnsw: load failed")
+)
 
 // Init initializes the HNSW index.
 func Init(dim, maxElements, M, efConstruction int) {
@@ -31,4 +40,25 @@ func Search(query []float32, k int) []uint8 {
 		(*C.uchar)(unsafe.Pointer(&labels[0])),
 	))
 	return labels[:n]
+}
+
+// Save writes the index to <path>.graph and <path>.labels. Returns an error on failure.
+func Save(path string) error {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	if int(C.hnsw_save(cpath)) != 0 {
+		return errSaveFailed
+	}
+	return nil
+}
+
+// Load reads a previously saved index. Returns the number of loaded elements.
+func Load(path string, dim, maxElements int) (int, error) {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	n := int(C.hnsw_load(cpath, C.int(dim), C.int(maxElements)))
+	if n < 0 {
+		return 0, errLoadFailed
+	}
+	return n, nil
 }
