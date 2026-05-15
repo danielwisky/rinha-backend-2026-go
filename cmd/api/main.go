@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/handler"
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/store"
@@ -30,11 +31,10 @@ func main() {
 	srv := &fasthttp.Server{
 		Handler:               h.Router,
 		Name:                  "api",
-		ReadTimeout:           5 * 1_000_000_000,
-		WriteTimeout:          5 * 1_000_000_000,
+		ReadTimeout:           5 * time.Second,
+		WriteTimeout:          5 * time.Second,
 		DisableKeepalive:      false,
 		TCPKeepalive:          true,
-		ReduceMemoryUsage:     true,
 		NoDefaultServerHeader: true,
 		NoDefaultDate:         true,
 	}

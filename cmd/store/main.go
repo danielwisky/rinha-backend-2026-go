@@ -8,7 +8,6 @@ import (
 
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/index"
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/server"
-	"github.com/daniel-wisky/rinha-backend-2026-go/internal/store"
 	"github.com/valyala/fasthttp"
 )
 
@@ -35,7 +34,7 @@ func main() {
 	}
 	log.Printf("index ready in %s", time.Since(start))
 
-	handler := server.New(store.NewLocal(idx))
+	handler := server.New(index.NewLocalStore(idx))
 
 	srv := &fasthttp.Server{
 		Handler:               handler.Router,
@@ -43,7 +42,6 @@ func main() {
 		ReadTimeout:           5 * time.Second,
 		WriteTimeout:          5 * time.Second,
 		TCPKeepalive:          true,
-		ReduceMemoryUsage:     true,
 		NoDefaultServerHeader: true,
 		NoDefaultDate:         true,
 	}

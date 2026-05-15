@@ -76,7 +76,7 @@ func (idx *Index) Load(path string) {
 	prevGC := debug.SetGCPercent(20)
 	defer debug.SetGCPercent(prevGC)
 
-	log.Printf("streaming %s into HNSW index (M=%d, ef_build=%d, float16)...", path, idx.cfg.M, idx.cfg.EfBuild)
+	log.Printf("streaming %s into HNSW index (M=%d, ef_build=%d, int8)...", path, idx.cfg.M, idx.cfg.EfBuild)
 
 	f, err := os.Open(path)
 	if err != nil {
