@@ -1,6 +1,6 @@
 // Package ivf is an exact-within-bucket k-NN search using IVF partitioning by
-// 4 binary features (16 buckets). Each search routes the query to one bucket
-// and does brute-force distance over ~N/16 vectors with int8 storage.
+// 6 binary features (64 buckets). Each search routes the query to one bucket
+// and does brute-force distance over ~N/64 vectors with int8 storage.
 //
 // Why this beats HNSW for fraud-detection:
 //
@@ -15,7 +15,7 @@
 //   uint32 magic = 0x49564601 ("IVF\x01")
 //   uint32 dim    (= 14)
 //   uint32 k      (= 5)
-//   uint32 nbuckets (= 16)
+//   uint32 nbuckets (= 64)
 //   uint32 counts[nbuckets]              — number of vectors in each bucket
 //   then for each bucket: count*dim bytes of int8 vectors, then count bytes
 //   of labels (0=legit, 1=fraud).
@@ -54,9 +54,9 @@ type Index struct {
 	mmapData []byte
 }
 
-// Bucket maps a 14-dim query vector to its bucket index in [0, 32).
+// Bucket maps a 14-dim query vector to its bucket index in [0, 64).
 //
-// 5 binary features chosen to spread the 3M-vector dataset roughly evenly
+// 6 binary features chosen to spread the 3M-vector dataset roughly evenly
 // while keeping queries near their own bucket's mass (features that are
 // stable across "similar" transactions):
 //
@@ -104,7 +104,7 @@ func f32ToI8(f float32) int8 {
 	if f > 1 {
 		f = 1
 	}
-	q := int32(f * 127.0)
+	var q int32
 	if f >= 0 {
 		q = int32(f*127.0 + 0.5)
 	} else {
@@ -122,8 +122,8 @@ func f32ToI8(f float32) int8 {
 // Search returns the K labels of the nearest neighbors within the query's bucket.
 //
 // Total cost is dominated by len(vectors[bucket])/Dim distance computations,
-// each ~14 multiplies. For 3M vectors split 16-way, that's ~187k distance
-// computations per query — memory-bandwidth bound, ~50-200µs on native amd64.
+// each ~14 multiplies. For 3M vectors split 64-way, that's ~47k distance
+// computations per query — memory-bandwidth bound, sub-100µs on native amd64.
 func (idx *Index) Search(v *[Dim]float32) [K]uint8 {
 	bucket := Bucket(v)
 

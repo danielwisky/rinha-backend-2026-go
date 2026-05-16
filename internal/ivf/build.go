@@ -8,14 +8,14 @@ import (
 )
 
 // BuildFromRefs streams references.json.gz and partitions all 3M vectors
-// into the 16 buckets. Returns an in-memory Index ready to Save.
+// into the 64 buckets. Returns an in-memory Index ready to Save.
 //
 // Implementation: two passes.
 //   pass 1: count vectors per bucket so we can preallocate exact-sized arrays.
 //   pass 2: actually fill the arrays.
 //
 // Two passes is faster overall than one-pass append because we avoid the
-// repeated reallocation of 16 growing slices (each ending up ~187k vectors).
+// repeated reallocation of 64 growing slices (each ending up ~47k vectors).
 func BuildFromRefs(refsPath string) (*Index, error) {
 	counts, err := countBuckets(refsPath)
 	if err != nil {
