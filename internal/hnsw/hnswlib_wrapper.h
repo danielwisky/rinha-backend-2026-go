@@ -15,6 +15,11 @@ int  hnsw_save(const char* path);
 // max_elements caps capacity; pass the same value used at build time.
 int  hnsw_load(const char* path, int dim, int max_elements);
 
+// Loads via mmap — data_level0 and per-element linklists live in a read-only
+// mapping of the file. Two processes mapping the same inode share the page
+// cache. Returns element count or -1.
+int  hnsw_load_mmap(const char* path, int dim, int max_elements);
+
 #ifdef __cplusplus
 }
 #endif

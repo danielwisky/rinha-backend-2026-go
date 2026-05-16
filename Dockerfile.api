@@ -1,14 +1,37 @@
-FROM golang:1.24-alpine AS builder
+# Stage 1: build the api binary. Pure Go (no CGO) now that the search is IVF
+# in-process — much smaller image and faster compile.
+FROM golang:1.24-alpine AS api-builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/api ./cmd/api
 
+# Stage 2: build buildivf in isolation so edits to cmd/api don't invalidate
+# the layer that runs it (and triggers the ~10s index build).
+FROM golang:1.24-alpine AS buildivf-builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY internal/ivf ./internal/ivf
+COPY cmd/buildivf ./cmd/buildivf
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/buildivf ./cmd/buildivf
+
+# Stage 3: run buildivf once. Cache key is the buildivf binary + refs file.
+FROM alpine:3.19 AS ivf-builder
+WORKDIR /work
+COPY --from=buildivf-builder /out/buildivf /usr/local/bin/buildivf
+COPY resources/references.json.gz ./refs.json.gz
+RUN mkdir -p /out && buildivf -refs ./refs.json.gz -out /out/ivf.bin
+
+# Stage 4: final runtime image — api binary + IVF index + small lookup files.
+# Both api1 and api2 use the SAME image, so /app/resources/ivf.bin has the
+# same inode on the Docker host — Linux page cache shares pages between procs.
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
-COPY --from=builder /out/api ./api
+COPY --from=api-builder /out/api ./api
+COPY --from=ivf-builder /out/ivf.bin ./resources/ivf.bin
 COPY resources/mcc_risk.json ./resources/
 COPY resources/normalization.json ./resources/
 EXPOSE 8080

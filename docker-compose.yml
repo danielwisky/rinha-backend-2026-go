@@ -12,7 +12,7 @@ services:
       resources:
         limits:
           cpus: "0.05"
-          memory: "8MB"
+          memory: "10MB"
     networks:
       - backend
 
@@ -22,19 +22,15 @@ services:
       dockerfile: Dockerfile.api
     platform: linux/amd64
     environment:
-      STORE_URL: unix:///run/store/store.sock
+      IVF_PATH: /app/resources/ivf.bin
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
-    volumes:
-      - store-sock:/run/store
-    depends_on:
-      - store
     deploy:
       resources:
         limits:
-          cpus: "0.15"
-          memory: "16MB"
+          cpus: "0.475"
+          memory: "170MB"
     networks:
       - backend
 
@@ -44,59 +40,29 @@ services:
       dockerfile: Dockerfile.api
     platform: linux/amd64
     environment:
-      STORE_URL: unix:///run/store/store.sock
+      IVF_PATH: /app/resources/ivf.bin
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
-    volumes:
-      - store-sock:/run/store
-    depends_on:
-      - store
     deploy:
       resources:
         limits:
-          cpus: "0.15"
-          memory: "16MB"
+          cpus: "0.475"
+          memory: "170MB"
     networks:
       - backend
 
-  store:
-    build:
-      context: .
-      dockerfile: Dockerfile.store
-    platform: linux/amd64
-    environment:
-      INDEX_PATH: /app/resources/index
-      EF_SEARCH: "40"
-      GOMAXPROCS: "2"
-      GOGC: "200"
-      LISTEN_SOCKET: /run/store/store.sock
-    volumes:
-      - store-sock:/run/store
-    deploy:
-      resources:
-        limits:
-          cpus: "0.65"
-          memory: "310MB"
-    networks:
-      - backend
-
-# Memory budget (HNSW M=2 int8, store w/ label_lookup + locks cleared):
-# nginx:    6 MB
-# api1:    20 MB
-# api2:    20 MB
-# store:  304 MB  → hnswlib post-cleanup ~160MB resident + Go + slack
-# Total:  350 MB ✓
+# Memory budget (IVF int8, 43MB on disk, mmap-shared):
+# nginx:    10 MB
+# api1:    170 MB → mmap'd index pages + go runtime + slack
+# api2:    170 MB → same; physical RAM shared via kernel page cache
+# Total:   350 MB ✓
 #
 # CPU budget:
 # nginx:    0.05
-# api1:     0.10
-# api2:     0.10
-# store:    0.75
+# api1:     0.475
+# api2:     0.475
 # Total:    1.00 ✓
-
-volumes:
-  store-sock:
 
 networks:
   backend:

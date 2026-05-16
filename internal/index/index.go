@@ -69,6 +69,22 @@ func NewFromDisk(cfg Config, path string) (*Index, error) {
 	return idx, nil
 }
 
+// NewFromDiskMmap loads via mmap — the big arrays stay in the kernel page
+// cache and are shared between processes mapping the same file inode. Use
+// this when running two api containers that read the same image layer: the
+// host RAM cost is ~one copy of the index instead of two.
+func NewFromDiskMmap(cfg Config, path string) (*Index, error) {
+	n, err := hnsw.LoadMmap(path, cfg.Dim, cfg.MaxElements)
+	if err != nil {
+		return nil, err
+	}
+	hnsw.SetEf(cfg.EfSearch)
+	idx := &Index{cfg: cfg}
+	idx.ready.Store(true)
+	log.Printf("index mmap'd from %s: %d vectors, ef_search=%d", path, n, cfg.EfSearch)
+	return idx, nil
+}
+
 // Save serializes the index to <path>.graph and <path>.labels.
 func (idx *Index) Save(path string) error {
 	return hnsw.Save(path)

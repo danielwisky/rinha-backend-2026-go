@@ -6,27 +6,31 @@ import (
 	"time"
 
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/handler"
+	"github.com/daniel-wisky/rinha-backend-2026-go/internal/ivf"
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/store"
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/vectorize"
 	"github.com/valyala/fasthttp"
 )
 
 func main() {
-	storeURL := envOr("STORE_URL", "unix:///run/store/store.sock")
 	resourcesPath := envOr("RESOURCES_PATH", "/app/resources")
 	listenAddr := envOr("LISTEN_ADDR", ":8080")
+	ivfPath := envOr("IVF_PATH", "/app/resources/ivf.bin")
 
 	vz, err := vectorize.NewVectorizer(resourcesPath)
 	if err != nil {
 		log.Fatalf("vectorizer: %v", err)
 	}
 
-	client, err := store.NewHTTPClient(storeURL)
+	start := time.Now()
+	idx, err := ivf.LoadMmap(ivfPath)
 	if err != nil {
-		log.Fatalf("store client: %v", err)
+		log.Fatalf("load ivf: %v", err)
 	}
+	log.Printf("ivf index mmap'd in %s", time.Since(start))
 
-	h := handler.New(vz, client)
+	var vs store.VectorStore = &ivf.Store{Idx: idx}
+	h := handler.New(vz, vs)
 
 	srv := &fasthttp.Server{
 		Handler:               h.Router,
@@ -40,7 +44,7 @@ func main() {
 		NoDefaultDate:         true,
 	}
 
-	log.Printf("api listening on %s (store=%s)", listenAddr, storeURL)
+	log.Printf("api listening on %s", listenAddr)
 	if err := srv.ListenAndServe(listenAddr); err != nil {
 		log.Fatalf("listen: %v", err)
 	}

@@ -71,6 +71,54 @@ func TestInt8SentinelMinus1(t *testing.T) {
 	}
 }
 
+func TestMmapLoadRoundtrip(t *testing.T) {
+	// Build small index, save, load via mmap, verify search works on mmap'd region.
+	legitVec := []float32{0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1, -1, 0.0292, 0.15, 0, 1, 0, 0.15, 0.006}
+	fraudVec := []float32{0.9506, 0.8333, 1.0, 0.2174, 0.8333, -1, -1, 0.9523, 1.0, 0, 1, 1, 0.75, 0.0055}
+
+	hnsw.Init(14, 20, 4, 50)
+	for i := 0; i < 10; i++ {
+		hnsw.Add(legitVec, 0, i)
+	}
+	for i := 0; i < 10; i++ {
+		hnsw.Add(fraudVec, 1, 10+i)
+	}
+	hnsw.SetEf(50)
+
+	path := filepath.Join(t.TempDir(), "idx")
+	if err := hnsw.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	n, err := hnsw.LoadMmap(path, 14, 20)
+	if err != nil {
+		t.Fatalf("mmap load: %v", err)
+	}
+	if n != 20 {
+		t.Fatalf("expected 20 loaded, got %d", n)
+	}
+
+	labels := hnsw.Search(legitVec, 5)
+	if len(labels) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(labels))
+	}
+	for i, l := range labels {
+		if l != 0 {
+			t.Errorf("mmap legit[%d]: expected 0, got %d", i, l)
+		}
+	}
+	labels = hnsw.Search(fraudVec, 5)
+	fc := 0
+	for _, l := range labels {
+		if l == 1 {
+			fc++
+		}
+	}
+	if fc < 4 {
+		t.Errorf("mmap fraud: expected ≥4 fraud, got %d", fc)
+	}
+}
+
 func TestSaveLoadRoundtrip(t *testing.T) {
 	// Build a small index, save, load into a fresh instance, verify search results match.
 	legitVec := []float32{0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1, -1, 0.0292, 0.15, 0, 1, 0, 0.15, 0.006}

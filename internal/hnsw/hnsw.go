@@ -62,3 +62,16 @@ func Load(path string, dim, maxElements int) (int, error) {
 	}
 	return n, nil
 }
+
+// LoadMmap maps the index file into memory read-only. data_level0 and the
+// per-element linklists are served directly from the page cache, which is
+// shared by the kernel across processes mapping the same inode.
+func LoadMmap(path string, dim, maxElements int) (int, error) {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	n := int(C.hnsw_load_mmap(cpath, C.int(dim), C.int(maxElements)))
+	if n < 0 {
+		return 0, errLoadFailed
+	}
+	return n, nil
+}
