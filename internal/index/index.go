@@ -25,13 +25,17 @@ type Config struct {
 }
 
 // DefaultConfig returns the competition-tuned defaults.
+//
+// M=4 ef_search=40 is the empirically tuned point on the recall/latency curve
+// for this 3M-element / 14-dim / int8 index. Lower M (2) saved memory but cost
+// ~2x latency at equivalent recall — net loss on the scoring formula.
 func DefaultConfig() Config {
 	return Config{
 		Dim:         14,
 		MaxElements: 3_000_000,
 		M:           4,
 		EfBuild:     200,
-		EfSearch:    200,
+		EfSearch:    40,
 		K:           5,
 	}
 }

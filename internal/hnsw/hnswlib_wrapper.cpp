@@ -134,6 +134,11 @@ int hnsw_load(const char* path, int dim, int max_elements) {
         return -1;
     }
 
+    // (Memory cleanup of label_lookup_/link_list_locks_ was tried and removed.
+    // Even though search doesn't touch them, freeing them correlated with
+    // worse stress results — possibly because hnswlib touches them via paths
+    // I haven't audited. Leave alone.)
+
     size_t n = g_index->cur_element_count;
     g_labels = (unsigned char*)calloc((size_t)max_elements, 1);
     if (!g_labels) return -1;

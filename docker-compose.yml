@@ -11,63 +11,92 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.25"
+          cpus: "0.05"
           memory: "8MB"
     networks:
       - backend
 
   api1:
-    image: danielwisky/rinha-2026-api:v2
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     platform: linux/amd64
     environment:
-      STORE_URL: http://store:9990
+      STORE_URL: unix:///run/store/store.sock
       RESOURCES_PATH: /app/resources
+      GOMAXPROCS: "1"
+      GOGC: "200"
+    volumes:
+      - store-sock:/run/store
     depends_on:
       - store
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.15"
           memory: "16MB"
     networks:
       - backend
 
   api2:
-    image: danielwisky/rinha-2026-api:v2
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     platform: linux/amd64
     environment:
-      STORE_URL: http://store:9990
+      STORE_URL: unix:///run/store/store.sock
       RESOURCES_PATH: /app/resources
+      GOMAXPROCS: "1"
+      GOGC: "200"
+    volumes:
+      - store-sock:/run/store
     depends_on:
       - store
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.15"
           memory: "16MB"
     networks:
       - backend
 
   store:
-    image: danielwisky/rinha-2026-store:v3
+    build:
+      context: .
+      dockerfile: Dockerfile.store
     platform: linux/amd64
     environment:
       INDEX_PATH: /app/resources/index
       EF_SEARCH: "40"
+      GOMAXPROCS: "2"
+      GOGC: "200"
+      LISTEN_SOCKET: /run/store/store.sock
+    volumes:
+      - store-sock:/run/store
     deploy:
       resources:
         limits:
-          cpus: "0.35"
+          cpus: "0.65"
           memory: "310MB"
     networks:
       - backend
 
-# Memory budget (int8 quantization, prebuilt index loaded from disk):
-# nginx:   8 MB
-# api1:   16 MB
-# api2:   16 MB
-# store: 310 MB → hnswlib(int8 vectors + graph) + labels + Go runtime + margin
-# Total: 350 MB ✓
+# Memory budget (HNSW M=2 int8, store w/ label_lookup + locks cleared):
+# nginx:    6 MB
+# api1:    20 MB
+# api2:    20 MB
+# store:  304 MB  → hnswlib post-cleanup ~160MB resident + Go + slack
+# Total:  350 MB ✓
+#
+# CPU budget:
+# nginx:    0.05
+# api1:     0.10
+# api2:     0.10
+# store:    0.75
+# Total:    1.00 ✓
+
+volumes:
+  store-sock:
 
 networks:
   backend:

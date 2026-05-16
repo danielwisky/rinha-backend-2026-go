@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	storeURL := envOr("STORE_URL", "http://store:9990")
+	storeURL := envOr("STORE_URL", "unix:///run/store/store.sock")
 	resourcesPath := envOr("RESOURCES_PATH", "/app/resources")
 	listenAddr := envOr("LISTEN_ADDR", ":8080")
 

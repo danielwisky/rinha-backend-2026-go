@@ -2,6 +2,7 @@ package handler
 
 import (
 	"log"
+	"sync"
 
 	"github.com/bytedance/sonic"
 	"github.com/daniel-wisky/rinha-backend-2026-go/internal/domain"
@@ -46,14 +47,51 @@ func (h *API) ready(ctx *fasthttp.RequestCtx) {
 	ctx.SetBodyString("ok")
 }
 
+// Pool of domain.Request structs so each fraud-score request doesn't allocate
+// a fresh one (with its nested slice/map fields) on the hot path.
+var requestPool = sync.Pool{
+	New: func() any { return new(domain.Request) },
+}
+
+// fraud_score = k/5 where k ∈ {0,1,2,3,4,5}. Only 6 possible response bodies —
+// precompute both approved variants so the hot path is just a SetBody.
+//   approved = score < 0.6, so k=3 (0.6) is the cutoff and below.
+var responseBodies = [2][6][]byte{
+	// approved=false  (k=3,4,5 → score 0.6, 0.8, 1)
+	{
+		[]byte(`{"approved":false,"fraud_score":0}`),
+		[]byte(`{"approved":false,"fraud_score":0.2}`),
+		[]byte(`{"approved":false,"fraud_score":0.4}`),
+		[]byte(`{"approved":false,"fraud_score":0.6}`),
+		[]byte(`{"approved":false,"fraud_score":0.8}`),
+		[]byte(`{"approved":false,"fraud_score":1}`),
+	},
+	// approved=true  (k=0,1,2 → score 0, 0.2, 0.4)
+	{
+		[]byte(`{"approved":true,"fraud_score":0}`),
+		[]byte(`{"approved":true,"fraud_score":0.2}`),
+		[]byte(`{"approved":true,"fraud_score":0.4}`),
+		[]byte(`{"approved":true,"fraud_score":0.6}`),
+		[]byte(`{"approved":true,"fraud_score":0.8}`),
+		[]byte(`{"approved":true,"fraud_score":1}`),
+	},
+}
+
 func (h *API) fraudScore(ctx *fasthttp.RequestCtx) {
-	var req domain.Request
-	if err := sonic.Unmarshal(ctx.PostBody(), &req); err != nil {
+	req := requestPool.Get().(*domain.Request)
+	defer func() {
+		// Reset slice to avoid retaining large backing arrays in the pool.
+		req.Customer.KnownMerchants = req.Customer.KnownMerchants[:0]
+		req.LastTx = nil
+		requestPool.Put(req)
+	}()
+
+	if err := sonic.Unmarshal(ctx.PostBody(), req); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		return
 	}
 
-	vec, err := h.vz.Vectorize(&req)
+	vec, err := h.vz.Vectorize(req)
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		return
@@ -66,14 +104,22 @@ func (h *API) fraudScore(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	resp := domain.NewResponse(labels)
-
-	b, err := sonic.Marshal(resp)
-	if err != nil {
-		log.Printf("encode: %v", err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+	// Inline the score computation — score = fraudCount/5, approved iff < 0.6.
+	if len(labels) == 0 {
+		ctx.SetContentType("application/json")
+		ctx.SetBody(responseBodies[0][5]) // fail closed: {approved:false,score:1}
 		return
 	}
+	fraudCount := 0
+	for _, l := range labels {
+		if l == 1 {
+			fraudCount++
+		}
+	}
+	approvedIdx := 0
+	if fraudCount < 3 { // score < 0.6
+		approvedIdx = 1
+	}
 	ctx.SetContentType("application/json")
-	ctx.SetBody(b)
+	ctx.SetBody(responseBodies[approvedIdx][fraudCount])
 }
