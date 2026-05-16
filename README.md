@@ -1,6 +1,6 @@
 # rinha-backend-2026-go
 
-Solução para a **Rinha de Backend 2026** — serviço de detecção de fraude em tempo real usando busca por vizinhos mais próximos (k-NN) via HNSW, com foco em throughput máximo dentro de recursos extremamente limitados (1 vCPU, 350 MB RAM).
+Solução para a **Rinha de Backend 2026** — serviço de detecção de fraude em tempo real usando k-NN com índice **IVF (inverted-file) quantizado em int8**, *mmap* em processo. Foco em throughput máximo dentro de 1 vCPU / 350 MB RAM.
 
 ## O que faz?
 
@@ -10,28 +10,43 @@ Recebe eventos de transação (valor, parcelamento, dados do cliente, estabeleci
 
 ```
                         ┌──► api1:8080 ──┐
-Client ──► nginx:9999 ──┤                ├──► store:9990 (HNSW)
-                        └──► api2:8080 ──┘
+Client ──► nginx:9999 ──┤                │   (índice IVF mmap'd
+                        │                │    em cada processo;
+                        └──► api2:8080 ──┘    páginas compartilhadas
+                                              pelo page cache do kernel)
 ```
+
+Não há serviço de store separado — o índice é carregado in-process via `mmap` direto do arquivo `ivf.bin` embutido na imagem. Como `api1` e `api2` rodam a partir da mesma imagem (mesmo inode), o Linux compartilha as páginas físicas do arquivo entre os dois containers.
 
 | Componente | Papel | Limite de recursos |
 |---|---|---|
-| **nginx** | Load balancer round-robin entre api1 e api2 | 0.05 CPU / 12 MB |
-| **api1 / api2** | Vetorização + proxy de busca | 0.20 CPU / 20 MB cada |
-| **store** | Índice HNSW em memória, busca k-NN | 0.55 CPU / 298 MB |
-| **Total** | | 1.00 CPU / 350 MB |
+| **nginx** | Load balancer round-robin entre api1 e api2, keep-alive 256 | 0.05 CPU / 10 MB |
+| **api1 / api2** | Vetorização + busca k-NN no IVF mmap | 0.475 CPU / 170 MB cada |
+| **Total** |  | 1.00 CPU / 350 MB |
+
+> Memória: as 170 MB por api são virtuais. O índice (~43 MB em disco, int8) entra na RSS de cada processo via mmap mas as **páginas físicas são compartilhadas** entre api1 e api2.
 
 ### API (`cmd/api`)
 
-- HTTP server com [fasthttp](https://github.com/valyala/fasthttp) e JSON parsing com [sonic](https://github.com/bytedance/sonic)
+- HTTP server [fasthttp](https://github.com/valyala/fasthttp), JSON com [sonic](https://github.com/bytedance/sonic)
 - Converte o payload de entrada em um vetor de 14 dimensões (`internal/vectorize`)
-- Encaminha o vetor ao **store** e traduz os rótulos retornados em `fraud_score`
+- Roteia o vetor para um bucket do IVF e faz busca exata dentro do bucket (`internal/ivf`)
+- Pool de `domain.Request` + tabela pré-computada das 12 respostas possíveis (`approved × k=0..5`) no hot path
 
-### Store (`cmd/store`)
+### Índice IVF (`internal/ivf`)
 
-- Carrega ~3 M vetores de referência de um arquivo `.json.gz` em background
-- Indexa via [hnswlib](https://github.com/nmslib/hnswlib) com binding CGO (`internal/hnsw`)
-- Expõe dois endpoints HTTP internos: `GET /ready` e `POST /search`
+- **64 buckets**, particionados por 6 features binárias (last_tx ausente, online, card_present, unknown_merchant, PM, weekend) — escolhidas para espalhar o dataset de ~3 M vetores e manter o query no mesmo bucket dos vizinhos relevantes
+- **Quantização int8** (escala 127): cada vetor ocupa 14 bytes vs 56 em float32
+- Busca exata dentro do bucket: L2² desenrolado em Dim=14 — o compilador vetoriza para SSE/AVX no amd64
+- Top-K=5 via insertion-sort sobre array fixo
+
+### Build do índice
+
+O `Dockerfile.api` faz o build do índice **dentro da própria imagem**, em estágio separado, para evitar re-rodar o build (~10 s) a cada edição em `cmd/api`:
+
+1. Compila `cmd/buildivf` em um estágio isolado
+2. Roda `buildivf -refs references.json.gz -out ivf.bin` em outro estágio (cacheado pelo hash do binário + dados de referência)
+3. Copia `ivf.bin` para a imagem final
 
 ### Vetor de features (14 dimensões)
 
@@ -54,7 +69,7 @@ Client ──► nginx:9999 ──┤                ├──► store:9990 (HN
 
 ### Lógica de score
 
-O store retorna os rótulos dos 5 vizinhos mais próximos (`0`=legítimo, `1`=fraude).
+O IVF retorna os rótulos dos 5 vizinhos mais próximos (`0`=legítimo, `1`=fraude).
 
 ```
 fraud_score = fraudCount / 5
@@ -82,14 +97,14 @@ approved    = fraud_score < 0.6   (≤ 2 vizinhos fraudulentos)
 
 ### `GET /ready`
 
-Retorna `200 OK` quando o índice HNSW terminou de carregar, `503` enquanto ainda está indexando.
+Retorna `200 OK` quando o índice IVF foi mapeado e está pronto, `503` caso contrário.
 
 ## Como rodar
 
 ### Pré-requisitos
 
 - Docker e Docker Compose
-- Arquivo `resources/references.json.gz` com os vetores de referência
+- Arquivo `resources/references.json.gz` (usado no build da imagem)
 
 ### Subir a stack completa
 
@@ -101,19 +116,15 @@ A API ficará disponível em `http://localhost:9999`.
 
 ### Desenvolvimento local (sem Docker)
 
-O **store** requer CGO e g++ instalado (para compilar o hnswlib):
+O projeto é **pure Go** (CGO_ENABLED=0), então não é preciso C++/g++:
 
 ```bash
-# Store (requer g++)
-CGO_ENABLED=1 go build -o store ./cmd/store
-REFS_PATH=./resources/references.json.gz EF_BUILD=20 EF_SEARCH=20 ./store
+# 1) Gere o índice IVF a partir das referências
+go run ./cmd/buildivf -refs ./resources/references.json.gz -out ./resources/ivf.bin
 
-# API (em outro terminal)
-CGO_ENABLED=0 go build -o api ./cmd/api
-STORE_URL=http://localhost:9990 RESOURCES_PATH=./resources ./api
+# 2) Suba a API
+RESOURCES_PATH=./resources IVF_PATH=./resources/ivf.bin go run ./cmd/api
 ```
-
-O `docker-compose.override.yml` já usa `EF_BUILD=20 EF_SEARCH=20` para indexação mais rápida em desenvolvimento.
 
 ### Testes
 
@@ -123,22 +134,20 @@ go test ./...
 
 ## Variáveis de ambiente
 
-| Variável | Serviço | Padrão | Descrição |
-|---|---|---|---|
-| `STORE_URL` | api | `http://store:9990` | URL do serviço store |
-| `RESOURCES_PATH` | api | `/app/resources` | Diretório com `normalization.json` e `mcc_risk.json` |
-| `API_PORT` | api | `8080` | Porta de escuta da API |
-| `REFS_PATH` | store | `/app/resources/references.json.gz` | Arquivo de vetores de referência |
-| `STORE_PORT` | store | `9990` | Porta de escuta do store |
-| `EF_BUILD` | store | `200` | Parâmetro efConstruction do HNSW (acurácia de build) |
-| `EF_SEARCH` | store | `200` | Parâmetro ef do HNSW (acurácia de busca) |
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `IVF_PATH` | `/app/resources/ivf.bin` | Arquivo do índice IVF |
+| `RESOURCES_PATH` | `/app/resources` | Diretório com `normalization.json` e `mcc_risk.json` |
+| `LISTEN_ADDR` | `:8080` | Endereço de escuta da API |
+| `GOMAXPROCS` | `1` | Limita o runtime Go ao orçamento de CPU |
+| `GOGC` | `200` | Reduz frequência do GC (índice é mmap, alocação no hot path é mínima) |
 
 ## Stack
 
-- **Go 1.24**
+- **Go 1.24** (pure Go, sem CGO)
 - [fasthttp](https://github.com/valyala/fasthttp) — HTTP server de alta performance
 - [sonic](https://github.com/bytedance/sonic) — JSON marshal/unmarshal otimizado
-- [hnswlib](https://github.com/nmslib/hnswlib) — índice HNSW via CGO (C++17)
+- IVF + L2² em int8 — busca k-NN exata dentro do bucket, implementação própria em `internal/ivf`
 - **Nginx 1.25** — load balancer
 - **Docker Compose** — orquestração local
 
@@ -146,7 +155,7 @@ go test ./...
 
 | Dá up em | Para ganhar |
 |---|---|
-| Flexibilidade de modelo | Latência mínima (k-NN puro, sem modelo ML pesado) |
-| Atualizações online do índice | Memória eficiente (índice imutável após load) |
-| Simplicidade de deploy (CGO) | Velocidade de busca (hnswlib nativo C++) |
-| Precisão máxima (ef alto) | Throughput (ef=200 é o balanço competição/recall) |
+| Recall máximo (k-NN global) | Latência: exato-dentro-do-bucket evita travessia de grafo / CGO |
+| Flexibilidade de modelo | Cache-friendliness: um bucket cabe em L2/L3, busca é memory-bandwidth bound |
+| Atualização online do índice | Memória: índice é imutável, mmap compartilhado entre os 2 processos |
+| Generalidade (HNSW seria mais robusto) | Simplicidade: pure Go, ~300 linhas, sem dependências nativas |

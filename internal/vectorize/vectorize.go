@@ -121,9 +121,11 @@ func (vz *Vectorizer) Vectorize(r *domain.Request) ([14]float32, error) {
 		v[11] = 1
 	}
 
-	// [12] mcc_risk (default 0.5)
-	v[12] = vz.mccRisk[r.Merchant.MCC]
-	if v[12] == 0 {
+	// [12] mcc_risk — default 0.5 when MCC is absent from the table.
+	// Use ok-check (not `== 0`) so legitimate MCCs configured as risk=0 stay 0.
+	if risk, ok := vz.mccRisk[r.Merchant.MCC]; ok {
+		v[12] = risk
+	} else {
 		v[12] = 0.5
 	}
 
