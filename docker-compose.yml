@@ -17,7 +17,7 @@ services:
       - backend
 
   api1:
-    image: danielwisky/rinha-2026-api:1.00
+    image: danielwisky/rinha-2026-api:1.0.0
     platform: linux/amd64
     environment:
       IVF_PATH: /app/resources/ivf.bin
@@ -33,7 +33,7 @@ services:
       - backend
 
   api2:
-    image: danielwisky/rinha-2026-api:1.00
+    image: danielwisky/rinha-2026-api:1.0.0
     platform: linux/amd64
     environment:
       IVF_PATH: /app/resources/ivf.bin
