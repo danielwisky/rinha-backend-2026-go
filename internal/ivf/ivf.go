@@ -31,9 +31,14 @@ import (
 )
 
 const (
-	Dim     = 14
+	Dim     = 14 // real feature count
 	K       = 5
 	Buckets = 64
+
+	// stride is the byte count per stored vector. We pad to 16 so the SSE2
+	// distance kernel can read full XMM registers without masking. Two trailing
+	// zero bytes per vector cost 6MB on a 3M-vector index (45MB → 51MB).
+	stride = 16
 )
 
 var (
@@ -69,7 +74,9 @@ type Index struct {
 //
 // Time-based splits (hour, weekday) cleave the dominant in-person bucket
 // without correlating tightly with the fraud label, so a query's true
-// neighbors usually share these features too.
+// neighbors usually share these features too. Tried adding tx_count_24h
+// as a 7th feature → bigger buckets stayed big and recall got worse from
+// boundary crossings.
 func Bucket(v *[Dim]float32) int {
 	b := 0
 	if v[5] < 0 { // -1 sentinel for no last_tx
@@ -121,13 +128,14 @@ func f32ToI8(f float32) int8 {
 
 // Search returns the K labels of the nearest neighbors within the query's bucket.
 //
-// Total cost is dominated by len(vectors[bucket])/Dim distance computations,
-// each ~14 multiplies. For 3M vectors split 64-way, that's ~47k distance
-// computations per query — memory-bandwidth bound, sub-100µs on native amd64.
+// Distance compute is dispatched to distI8x14 — SSE2 asm on amd64, pure-Go
+// fallback elsewhere. Stride is 16 bytes per stored vector (14 real + 2 zero
+// pad) so a single MOVOU loads a complete vector into one XMM register.
 func (idx *Index) Search(v *[Dim]float32) [K]uint8 {
 	bucket := Bucket(v)
 
-	var q [Dim]int8
+	// Pad query to 16 bytes with trailing zeros to match the stored stride.
+	var q [stride]int8
 	for i := 0; i < Dim; i++ {
 		q[i] = f32ToI8(v[i])
 	}
@@ -136,44 +144,20 @@ func (idx *Index) Search(v *[Dim]float32) [K]uint8 {
 	labs := idx.labels[bucket]
 	n := int(idx.counts[bucket])
 
-	// Top-K via insertion-sort over a fixed slice. K=5 — tiny, branchless-ish.
-	var topDist [K]int32
+	var topDist [K]uint32
 	var topLabel [K]uint8
 	for i := 0; i < K; i++ {
 		topDist[i] = 1 << 30
 	}
 
-	// Hoist the slice base pointer once so the inner loop has zero bounds
-	// checks. Each element is exactly Dim=14 bytes; we step by 14.
 	if n == 0 {
 		return topLabel
 	}
 	base := unsafe.Pointer(&vecs[0])
-	const stride = Dim
 	for i := 0; i < n; i++ {
-		p := (*[Dim]int8)(unsafe.Add(base, uintptr(i*stride)))
-		// Unrolled L2² over Dim=14. Straight-line int math the compiler
-		// can vectorize (SSE/AVX) on native amd64. Early-exit kernels
-		// were tried and proved slower — branches were mispredicted often
-		// enough to outweigh the saved multiplies.
-		d0 := int32(q[0]) - int32(p[0])
-		d1 := int32(q[1]) - int32(p[1])
-		d2 := int32(q[2]) - int32(p[2])
-		d3 := int32(q[3]) - int32(p[3])
-		d4 := int32(q[4]) - int32(p[4])
-		d5 := int32(q[5]) - int32(p[5])
-		d6 := int32(q[6]) - int32(p[6])
-		d7 := int32(q[7]) - int32(p[7])
-		d8 := int32(q[8]) - int32(p[8])
-		d9 := int32(q[9]) - int32(p[9])
-		d10 := int32(q[10]) - int32(p[10])
-		d11 := int32(q[11]) - int32(p[11])
-		d12 := int32(q[12]) - int32(p[12])
-		d13 := int32(q[13]) - int32(p[13])
-		dist := d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 +
-			d7*d7 + d8*d8 + d9*d9 + d10*d10 + d11*d11 + d12*d12 + d13*d13
+		p := (*[stride]int8)(unsafe.Add(base, uintptr(i*stride)))
+		dist := distI8x14(&q, p)
 
-		// Skip if worse than the current worst in top-K.
 		if dist >= topDist[K-1] {
 			continue
 		}
@@ -284,7 +268,7 @@ func Load(path string) (*Index, error) {
 		if n == 0 {
 			continue
 		}
-		vbytes := make([]byte, n*Dim)
+		vbytes := make([]byte, n*stride)
 		if _, err := io.ReadFull(f, vbytes); err != nil {
 			return nil, err
 		}

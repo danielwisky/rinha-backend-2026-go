@@ -25,7 +25,9 @@ func BuildFromRefs(refsPath string) (*Index, error) {
 	var vecs [Buckets][]int8
 	var labs [Buckets][]byte
 	for b := 0; b < Buckets; b++ {
-		vecs[b] = make([]int8, counts[b]*Dim)
+		// 16-byte stride per vector — last 2 bytes stay zero so SSE2 can
+		// load each candidate into a single XMM register without masking.
+		vecs[b] = make([]int8, counts[b]*stride)
 		labs[b] = make([]byte, counts[b])
 	}
 
@@ -34,10 +36,11 @@ func BuildFromRefs(refsPath string) (*Index, error) {
 		var v [Dim]float32
 		copy(v[:], vec)
 		b := Bucket(&v)
-		off := cursors[b] * Dim
+		off := cursors[b] * stride
 		for i := 0; i < Dim; i++ {
 			vecs[b][int(off)+i] = f32ToI8(v[i])
 		}
+		// bytes [off+Dim, off+stride) left at zero by make()
 		labs[b][cursors[b]] = label
 		cursors[b]++
 	})

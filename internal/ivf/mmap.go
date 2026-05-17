@@ -62,9 +62,9 @@ func LoadMmap(path string) (*Index, error) {
 		if n == 0 {
 			continue
 		}
-		vbytes := data[off : off+n*Dim : off+n*Dim]
+		vbytes := data[off : off+n*stride : off+n*stride]
 		idx.vectors[b] = unsafeBytesToI8(vbytes)
-		off += n * Dim
+		off += n * stride
 		idx.labels[b] = data[off : off+n : off+n]
 		off += n
 	}
