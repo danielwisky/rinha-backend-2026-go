@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -42,6 +44,13 @@ func main() {
 		TCPKeepalive:          true,
 		NoDefaultServerHeader: true,
 		NoDefaultDate:         true,
+	}
+
+	if os.Getenv("PPROF") == "1" {
+		go func() {
+			log.Println("pprof on :6060")
+			_ = http.ListenAndServe(":6060", nil)
+		}()
 	}
 
 	log.Printf("api listening on %s", listenAddr)
