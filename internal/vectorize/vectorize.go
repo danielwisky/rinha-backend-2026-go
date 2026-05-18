@@ -22,8 +22,12 @@ type config struct {
 // Vectorizer converts fraud requests into 14-dimensional float32 vectors.
 // Safe for concurrent use after construction.
 type Vectorizer struct {
-	cfg     config
-	mccRisk map[string]float32
+	cfg config
+
+	// mccRisk is a dense lookup keyed by the parsed integer MCC. 10000 floats
+	// = 40 KB, fits comfortably in L1. Slot value 0.5 is the default for
+	// unknown MCCs; the bitmap below tells which slots came from the JSON.
+	mccRisk [10000]float32
 }
 
 // NewVectorizer loads normalization.json and mcc_risk.json from dir.
@@ -41,12 +45,60 @@ func NewVectorizer(dir string) (*Vectorizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	var mccRisk map[string]float32
-	if err := json.Unmarshal(mccData, &mccRisk); err != nil {
+	var mccMap map[string]float32
+	if err := json.Unmarshal(mccData, &mccMap); err != nil {
 		return nil, err
 	}
 
-	return &Vectorizer{cfg: cfg, mccRisk: mccRisk}, nil
+	vz := &Vectorizer{cfg: cfg}
+	for i := range vz.mccRisk {
+		vz.mccRisk[i] = 0.5 // default when MCC isn't in the risk table
+	}
+	for k, v := range mccMap {
+		idx, err := parseMCC(k)
+		if err != nil {
+			return nil, fmt.Errorf("mcc_risk: bad key %q: %w", k, err)
+		}
+		vz.mccRisk[idx] = v
+	}
+
+	return vz, nil
+}
+
+// parseMCC parses a 4-digit MCC string into an int 0-9999. Returns an error if
+// the string is malformed; never called on the hot path (used at boot to seed
+// the lookup table). The hot-path equivalent is parseMCCFast.
+func parseMCC(s string) (int, error) {
+	if len(s) == 0 || len(s) > 4 {
+		return 0, fmt.Errorf("mcc must be 1-4 digits, got %d", len(s))
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("non-digit %q in mcc", c)
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
+// parseMCCFast is the hot-path version: assumes a digits-only string of length
+// 1-4 and skips error checks. Falls through to a default of 0 on bad input,
+// which routes to the 0.5 default slot.
+func parseMCCFast(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+		if n >= 10000 {
+			return 0
+		}
+	}
+	return n
 }
 
 // Vectorize converts a Request into a 14-dimensional float32 vector.
@@ -121,13 +173,10 @@ func (vz *Vectorizer) Vectorize(r *domain.Request) ([14]float32, error) {
 		v[11] = 1
 	}
 
-	// [12] mcc_risk — default 0.5 when MCC is absent from the table.
-	// Use ok-check (not `== 0`) so legitimate MCCs configured as risk=0 stay 0.
-	if risk, ok := vz.mccRisk[r.Merchant.MCC]; ok {
-		v[12] = risk
-	} else {
-		v[12] = 0.5
-	}
+	// [12] mcc_risk — dense lookup. Unknown MCCs map to slot 0 (parseMCCFast
+	// returns 0 on bad input), and `mccRisk[0]` is seeded with 0.5 — so
+	// MCC "0" or any malformed code lands on the default.
+	v[12] = vz.mccRisk[parseMCCFast(r.Merchant.MCC)]
 
 	// [13] merchant_avg_amount
 	v[13] = clamp(float32(r.Merchant.AvgAmount) / vz.cfg.MaxMerchantAvgAmount)
