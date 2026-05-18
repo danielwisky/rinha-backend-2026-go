@@ -26,6 +26,7 @@ services:
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
+      GOMEMLIMIT: "150MiB"
     deploy:
       resources:
         limits:
@@ -44,6 +45,7 @@ services:
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
+      GOMEMLIMIT: "150MiB"
     deploy:
       resources:
         limits:

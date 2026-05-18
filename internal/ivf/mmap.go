@@ -35,7 +35,19 @@ func LoadMmap(path string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = unix.Madvise(data, unix.MADV_RANDOM)
+	// Bucket scans are linear over contiguous int8 vectors, so we want the
+	// kernel to keep these pages resident — opposite of MADV_RANDOM. The
+	// k6 ramp-up to 900 RPS only takes 120s, and the first request hitting
+	// a cold bucket would otherwise pay disk + TLB cost.
+	_ = unix.Madvise(data, unix.MADV_WILLNEED)
+	// Touch one byte per page to force the page faults during boot instead
+	// of on the hot path. 43 MB / 4 KB ≈ 10 700 iterations — well under 1 s.
+	const pageSize = 4096
+	var sink byte
+	for i := 0; i < size; i += pageSize {
+		sink ^= data[i]
+	}
+	_ = sink
 
 	hdr := data[:4*4+4*Buckets]
 	if binary.LittleEndian.Uint32(hdr[0:]) != magic {

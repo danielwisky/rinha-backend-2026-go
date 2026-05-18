@@ -1,6 +1,6 @@
 // Package ivf is an exact-within-bucket k-NN search using IVF partitioning by
-// 6 binary features (64 buckets). Each search routes the query to one bucket
-// and does brute-force distance over ~N/64 vectors with int8 storage.
+// 8 binary features (256 buckets). Each search routes the query to one bucket
+// and does brute-force distance over ~N/256 vectors with int8 storage.
 //
 // Why this beats HNSW for fraud-detection:
 //
@@ -15,7 +15,7 @@
 //   uint32 magic = 0x49564601 ("IVF\x01")
 //   uint32 dim    (= 14)
 //   uint32 k      (= 5)
-//   uint32 nbuckets (= 64)
+//   uint32 nbuckets (= 256)
 //   uint32 counts[nbuckets]              — number of vectors in each bucket
 //   then for each bucket: count*dim bytes of int8 vectors, then count bytes
 //   of labels (0=legit, 1=fraud).
@@ -33,7 +33,7 @@ import (
 const (
 	Dim     = 14 // real feature count
 	K       = 5
-	Buckets = 64
+	Buckets = 256
 
 	// stride is the byte count per stored vector. We pad to 16 so the SSE2
 	// distance kernel can read full XMM registers without masking. Two trailing
@@ -59,9 +59,9 @@ type Index struct {
 	mmapData []byte
 }
 
-// Bucket maps a 14-dim query vector to its bucket index in [0, 64).
+// Bucket maps a 14-dim query vector to its bucket index in [0, 256).
 //
-// 6 binary features chosen to spread the 3M-vector dataset roughly evenly
+// 8 binary features chosen to spread the 3M-vector dataset roughly evenly
 // while keeping queries near their own bucket's mass (features that are
 // stable across "similar" transactions):
 //
@@ -71,12 +71,16 @@ type Index struct {
 //	bit 3: unknown_merchant            (v[11])
 //	bit 4: hour-of-day in PM half      (v[3] >= 0.5, hour > 11 UTC)
 //	bit 5: weekend                     (v[4] > 0.7, day-of-week sat/sun)
+//	bit 6: established history         (v[5] >= 0.2, last tx > ~few hrs ago)
+//	bit 7: mid-week or later           (v[4] >= 0.3, Wed-Sun)
 //
-// Time-based splits (hour, weekday) cleave the dominant in-person bucket
-// without correlating tightly with the fraud label, so a query's true
-// neighbors usually share these features too. Tried adding tx_count_24h
-// as a 7th feature → bigger buckets stayed big and recall got worse from
-// boundary crossings.
+// Bits 6 and 7 were picked empirically by inspecting the dominant buckets in
+// the reference set. The 6-bit partition left one bucket with 538k of the
+// 3M vectors (card_present + PM hour); v[5]>=0.2 splits its time-since-last
+// distribution roughly in half (median ≈ 0.26 within the bucket). The
+// second-worst bucket (online + unknown_merchant, 477k) is split by the
+// weekday refinement v[4]>=0.3 (Wed-Sun ~71% globally). Net: dominant bucket
+// drops from 538k → 307k, top-5 mass from 1.28M → 960k.
 func Bucket(v *[Dim]float32) int {
 	b := 0
 	if v[5] < 0 { // -1 sentinel for no last_tx
@@ -96,6 +100,12 @@ func Bucket(v *[Dim]float32) int {
 	}
 	if v[4] >= 0.7 {
 		b |= 32
+	}
+	if v[5] >= 0.2 {
+		b |= 64
+	}
+	if v[4] >= 0.3 {
+		b |= 128
 	}
 	return b
 }
