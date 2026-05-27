@@ -1,24 +1,17 @@
-// Package ivf is an exact-within-bucket k-NN search using IVF partitioning by
-// 8 binary features (256 buckets). Each search routes the query to one bucket
-// and does brute-force distance over ~N/256 vectors with int8 storage.
+// Package ivf is a k-means IVF (Inverted File) k-NN index with multi-probe
+// search. Queries are quantized to int8, routed to the top-NProbe nearest
+// centroids by L2 distance, and the K=5 nearest neighbors are picked across
+// those clusters.
 //
-// Why this beats HNSW for fraud-detection:
+// Disk format ("ivf" binary, little-endian, v2):
 //
-//  1. No graph traversal overhead, no CGO. Pure Go, branch-friendly.
-//  2. Per-query data is bounded — one bucket fits in L2/L3 cache. Memory-
-//     bandwidth bound, not lock or pointer-chasing bound.
-//  3. Exact within the bucket — there's no ef_search/recall tradeoff. The
-//     only approximation is the partitioning itself (queries get the
-//     5-NN among same-features-class neighbors).
-//
-// Disk format ("ivf" binary, little-endian):
-//   uint32 magic = 0x49564601 ("IVF\x01")
-//   uint32 dim    (= 14)
-//   uint32 k      (= 5)
-//   uint32 nbuckets (= 256)
-//   uint32 counts[nbuckets]              — number of vectors in each bucket
-//   then for each bucket: count*dim bytes of int8 vectors, then count bytes
-//   of labels (0=legit, 1=fraud).
+//	uint32 magic    = 0x49564602 ("IVF\x02")
+//	uint32 dim      = 14
+//	uint32 k        = 5
+//	uint32 nclusters = NClusters (2048)
+//	int8   centroids[NClusters * stride]      stride=16, last 2 bytes per centroid zero
+//	uint32 counts[NClusters]                  vectors per cluster
+//	then per cluster: counts[c]*stride bytes of int8 vectors, then counts[c] bytes of labels.
 package ivf
 
 import (
@@ -31,89 +24,115 @@ import (
 )
 
 const (
-	Dim     = 14 // real feature count
-	K       = 5
-	Buckets = 256
+	Dim    = 14
+	K      = 5
+	NProbe = 4
 
-	// stride is the byte count per stored vector. We pad to 16 so the SSE2
-	// distance kernel can read full XMM registers without masking. Two trailing
-	// zero bytes per vector cost 6MB on a 3M-vector index (45MB → 51MB).
 	stride = 16
 )
 
 var (
-	magic = uint32(0x49564601)
+	magic = uint32(0x49564602)
 
-	errBadMagic = errors.New("ivf: bad magic")
-	errBadDim   = errors.New("ivf: dim mismatch")
+	errBadMagic    = errors.New("ivf: bad magic")
+	errBadDim      = errors.New("ivf: dim mismatch")
+	errBadClusters = errors.New("ivf: cluster count mismatch")
 )
 
-// Index holds 16 bucket slices of contiguous int8 vectors and uint8 labels.
-// The backing arrays may be malloc'd (Load) or mmap'd (LoadMmap).
 type Index struct {
-	counts  [Buckets]uint32 // number of vectors in each bucket
-	vectors [Buckets][]int8 // each: count*Dim bytes
-	labels  [Buckets][]byte // each: count bytes
+	counts    [NClusters]uint32
+	centroids []int8 // NClusters * stride int8
+	vectors   [NClusters][]int8
+	labels    [NClusters][]byte
 
-	// Held when the backing is mmap'd so we can munmap on Close (rarely used).
 	mmapData []byte
 }
 
-// Bucket maps a 14-dim query vector to its bucket index in [0, 256).
-//
-// 8 binary features chosen to spread the 3M-vector dataset roughly evenly
-// while keeping queries near their own bucket's mass (features that are
-// stable across "similar" transactions):
-//
-//	bit 0: last_transaction is null    (sentinel: v[5] == -1)
-//	bit 1: terminal.is_online          (v[9])
-//	bit 2: terminal.card_present       (v[10])
-//	bit 3: unknown_merchant            (v[11])
-//	bit 4: hour-of-day in PM half      (v[3] >= 0.5, hour > 11 UTC)
-//	bit 5: weekend                     (v[4] > 0.7, day-of-week sat/sun)
-//	bit 6: established history         (v[5] >= 0.2, last tx > ~few hrs ago)
-//	bit 7: mid-week or later           (v[4] >= 0.3, Wed-Sun)
-//
-// Bits 6 and 7 were picked empirically by inspecting the dominant buckets in
-// the reference set. The 6-bit partition left one bucket with 538k of the
-// 3M vectors (card_present + PM hour); v[5]>=0.2 splits its time-since-last
-// distribution roughly in half (median ≈ 0.26 within the bucket). The
-// second-worst bucket (online + unknown_merchant, 477k) is split by the
-// weekday refinement v[4]>=0.3 (Wed-Sun ~71% globally). Net: dominant bucket
-// drops from 538k → 307k, top-5 mass from 1.28M → 960k.
-func Bucket(v *[Dim]float32) int {
-	b := 0
-	if v[5] < 0 { // -1 sentinel for no last_tx
-		b |= 1
+// quantize14 packs a 14-dim float32 query into a stride-16 int8 array.
+func quantize14(v *[Dim]float32) [stride]int8 {
+	var q [stride]int8
+	for i := 0; i < Dim; i++ {
+		q[i] = f32ToI8(v[i])
 	}
-	if v[9] >= 0.5 {
-		b |= 2
-	}
-	if v[10] >= 0.5 {
-		b |= 4
-	}
-	if v[11] >= 0.5 {
-		b |= 8
-	}
-	if v[3] >= 0.5 {
-		b |= 16
-	}
-	if v[4] >= 0.7 {
-		b |= 32
-	}
-	if v[5] >= 0.2 {
-		b |= 64
-	}
-	if v[4] >= 0.3 {
-		b |= 128
-	}
-	return b
+	return q
 }
 
-// f32ToI8 clamps to [-1, 1] then quantizes to int8 with scale 127.
+// NearestCluster returns the cluster index whose centroid is L2-closest to v.
+func (idx *Index) NearestCluster(v *[Dim]float32) int {
+	q := quantize14(v)
+	return nearestClusterI8(&q, idx.centroids)
+}
+
+// Search returns the K labels of nearest neighbors across the top-NProbe
+// nearest clusters (multi-probe IVF).
 //
-// The sentinel value -1 (no last_tx) maps cleanly to -127, preserving
-// "absence of last tx" as a far-out distance from any normalized value.
+// Pass 1: compute distance to every centroid, keep top-NProbe via insertion-sort.
+// Pass 2: scan those NProbe clusters; maintain a global top-K (insertion-sort).
+//
+// Centroid scan: NClusters * 1 dist = ~2048 distI8x14 calls over 32KB in L1.
+// Cluster scans: NProbe * mean_cluster_size ≈ 8 * 1500 = ~12k dist calls.
+func (idx *Index) Search(v *[Dim]float32) [K]uint8 {
+	q := quantize14(v)
+
+	var probeDist [NProbe]uint32
+	var probeIdx [NProbe]int
+	for i := 0; i < NProbe; i++ {
+		probeDist[i] = 1 << 30
+	}
+	cbase := unsafe.Pointer(&idx.centroids[0])
+	for c := 0; c < NClusters; c++ {
+		p := (*[stride]int8)(unsafe.Add(cbase, uintptr(c*stride)))
+		d := distI8x14(&q, p)
+		if d >= probeDist[NProbe-1] {
+			continue
+		}
+		j := NProbe - 1
+		for j > 0 && probeDist[j-1] > d {
+			probeDist[j] = probeDist[j-1]
+			probeIdx[j] = probeIdx[j-1]
+			j--
+		}
+		probeDist[j] = d
+		probeIdx[j] = c
+	}
+
+	var topDist [K]uint32
+	var topLabel [K]uint8
+	for i := 0; i < K; i++ {
+		topDist[i] = 1 << 30
+	}
+
+	for pi := 0; pi < NProbe; pi++ {
+		c := probeIdx[pi]
+		n := int(idx.counts[c])
+		if n == 0 {
+			continue
+		}
+		vecs := idx.vectors[c]
+		labs := idx.labels[c]
+		vbase := unsafe.Pointer(&vecs[0])
+		for i := 0; i < n; i++ {
+			p := (*[stride]int8)(unsafe.Add(vbase, uintptr(i*stride)))
+			dist := distI8x14(&q, p)
+			if dist >= topDist[K-1] {
+				continue
+			}
+			j := K - 1
+			for j > 0 && topDist[j-1] > dist {
+				topDist[j] = topDist[j-1]
+				topLabel[j] = topLabel[j-1]
+				j--
+			}
+			topDist[j] = dist
+			topLabel[j] = labs[i]
+		}
+	}
+
+	return topLabel
+}
+
+// f32ToI8 clamps to [-1, 1] and quantizes with scale 127. The sentinel value
+// -1 (no last_tx) maps cleanly to -127.
 func f32ToI8(f float32) int8 {
 	if f < -1 {
 		f = -1
@@ -136,57 +155,6 @@ func f32ToI8(f float32) int8 {
 	return int8(q)
 }
 
-// Search returns the K labels of the nearest neighbors within the query's bucket.
-//
-// Distance compute is dispatched to distI8x14 — SSE2 asm on amd64, pure-Go
-// fallback elsewhere. Stride is 16 bytes per stored vector (14 real + 2 zero
-// pad) so a single MOVOU loads a complete vector into one XMM register.
-func (idx *Index) Search(v *[Dim]float32) [K]uint8 {
-	bucket := Bucket(v)
-
-	// Pad query to 16 bytes with trailing zeros to match the stored stride.
-	var q [stride]int8
-	for i := 0; i < Dim; i++ {
-		q[i] = f32ToI8(v[i])
-	}
-
-	vecs := idx.vectors[bucket]
-	labs := idx.labels[bucket]
-	n := int(idx.counts[bucket])
-
-	var topDist [K]uint32
-	var topLabel [K]uint8
-	for i := 0; i < K; i++ {
-		topDist[i] = 1 << 30
-	}
-
-	if n == 0 {
-		return topLabel
-	}
-	base := unsafe.Pointer(&vecs[0])
-	for i := 0; i < n; i++ {
-		p := (*[stride]int8)(unsafe.Add(base, uintptr(i*stride)))
-		dist := distI8x14(&q, p)
-
-		if dist >= topDist[K-1] {
-			continue
-		}
-		// Insert into sorted top-K (K=5, so 5-step shift max).
-		j := K - 1
-		for j > 0 && topDist[j-1] > dist {
-			topDist[j] = topDist[j-1]
-			topLabel[j] = topLabel[j-1]
-			j--
-		}
-		topDist[j] = dist
-		topLabel[j] = labs[i]
-	}
-
-	return topLabel
-}
-
-// Store wraps Index to satisfy the store.VectorStore interface used by the api
-// handler: Ready() bool + Search([14]float32) ([]uint8, error).
 type Store struct{ Idx *Index }
 
 func (s *Store) Ready() bool { return s.Idx != nil }
@@ -200,15 +168,12 @@ func (s *Store) Search(v [Dim]float32) ([]uint8, error) {
 	return out, nil
 }
 
-// Build constructs an in-memory index from per-bucket vector/label slices.
-// Each vecs[b] must be counts[b]*Dim int8 values; labs[b] must be counts[b].
-func Build(counts [Buckets]uint32, vecs [Buckets][]int8, labs [Buckets][]byte) *Index {
-	idx := &Index{counts: counts, vectors: vecs, labels: labs}
-	return idx
+func Build(centroids []int8, counts [NClusters]uint32, vecs [NClusters][]int8, labs [NClusters][]byte) *Index {
+	return &Index{centroids: centroids, counts: counts, vectors: vecs, labels: labs}
 }
 
-// Save writes the index to a single binary file. The file is mmap-friendly:
-// header is small and pointed-to arrays are contiguous per bucket.
+const headerSize = 4*4 + NClusters*stride + 4*NClusters
+
 func (idx *Index) Save(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -216,36 +181,36 @@ func (idx *Index) Save(path string) error {
 	}
 	defer f.Close()
 
-	hdr := make([]byte, 4*4+4*Buckets)
+	hdr := make([]byte, headerSize)
 	binary.LittleEndian.PutUint32(hdr[0:], magic)
 	binary.LittleEndian.PutUint32(hdr[4:], uint32(Dim))
 	binary.LittleEndian.PutUint32(hdr[8:], uint32(K))
-	binary.LittleEndian.PutUint32(hdr[12:], uint32(Buckets))
-	for b := 0; b < Buckets; b++ {
-		binary.LittleEndian.PutUint32(hdr[16+4*b:], idx.counts[b])
+	binary.LittleEndian.PutUint32(hdr[12:], uint32(NClusters))
+
+	copy(hdr[16:16+NClusters*stride], unsafeI8ToBytes(idx.centroids))
+	off := 16 + NClusters*stride
+	for c := 0; c < NClusters; c++ {
+		binary.LittleEndian.PutUint32(hdr[off+4*c:], idx.counts[c])
 	}
 	if _, err := f.Write(hdr); err != nil {
 		return err
 	}
 
-	for b := 0; b < Buckets; b++ {
-		n := int(idx.counts[b])
+	for c := 0; c < NClusters; c++ {
+		n := int(idx.counts[c])
 		if n == 0 {
 			continue
 		}
-		// int8 slice → bytes (same memory).
-		vbytes := unsafeI8ToBytes(idx.vectors[b])
-		if _, err := f.Write(vbytes); err != nil {
+		if _, err := f.Write(unsafeI8ToBytes(idx.vectors[c])); err != nil {
 			return err
 		}
-		if _, err := f.Write(idx.labels[b]); err != nil {
+		if _, err := f.Write(idx.labels[c]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Load reads the index into private memory (each process has its own copy).
 func Load(path string) (*Index, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -253,28 +218,31 @@ func Load(path string) (*Index, error) {
 	}
 	defer f.Close()
 
-	hdr := make([]byte, 4*4+4*Buckets)
+	hdr := make([]byte, headerSize)
 	if _, err := io.ReadFull(f, hdr); err != nil {
 		return nil, err
 	}
-	m := binary.LittleEndian.Uint32(hdr[0:])
-	if m != magic {
+	if binary.LittleEndian.Uint32(hdr[0:]) != magic {
 		return nil, errBadMagic
 	}
 	if binary.LittleEndian.Uint32(hdr[4:]) != uint32(Dim) {
 		return nil, errBadDim
 	}
-	nb := int(binary.LittleEndian.Uint32(hdr[12:]))
-	if nb != Buckets {
-		return nil, fmt.Errorf("ivf: expected %d buckets, got %d", Buckets, nb)
+	nc := int(binary.LittleEndian.Uint32(hdr[12:]))
+	if nc != NClusters {
+		return nil, fmt.Errorf("%w: expected %d, got %d", errBadClusters, NClusters, nc)
 	}
 
 	idx := &Index{}
-	for b := 0; b < Buckets; b++ {
-		idx.counts[b] = binary.LittleEndian.Uint32(hdr[16+4*b:])
+	idx.centroids = make([]int8, NClusters*stride)
+	copy(unsafeI8ToBytes(idx.centroids), hdr[16:16+NClusters*stride])
+	off := 16 + NClusters*stride
+	for c := 0; c < NClusters; c++ {
+		idx.counts[c] = binary.LittleEndian.Uint32(hdr[off+4*c:])
 	}
-	for b := 0; b < Buckets; b++ {
-		n := int(idx.counts[b])
+
+	for c := 0; c < NClusters; c++ {
+		n := int(idx.counts[c])
 		if n == 0 {
 			continue
 		}
@@ -282,12 +250,12 @@ func Load(path string) (*Index, error) {
 		if _, err := io.ReadFull(f, vbytes); err != nil {
 			return nil, err
 		}
-		idx.vectors[b] = unsafeBytesToI8(vbytes)
+		idx.vectors[c] = unsafeBytesToI8(vbytes)
 		lbytes := make([]byte, n)
 		if _, err := io.ReadFull(f, lbytes); err != nil {
 			return nil, err
 		}
-		idx.labels[b] = lbytes
+		idx.labels[c] = lbytes
 	}
 	return idx, nil
 }

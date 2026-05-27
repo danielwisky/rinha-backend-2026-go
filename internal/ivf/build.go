@@ -4,61 +4,136 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"runtime"
+	"sort"
+	"sync"
+	"time"
 )
 
-// BuildFromRefs streams references.json.gz and partitions all 3M vectors
-// into the 64 buckets. Returns an in-memory Index ready to Save.
+// BuildFromRefs streams references.json.gz, runs k-means with NClusters
+// centroids on the float32 vectors, then assigns every vector to its nearest
+// (quantized) centroid. Returns an in-memory Index ready to Save.
 //
-// Implementation: two passes.
-//   pass 1: count vectors per bucket so we can preallocate exact-sized arrays.
-//   pass 2: actually fill the arrays.
+// Phases:
+//  1. Stream all references into a row-major []float32 + []byte labels.
+//  2. Mini-batch k-means → quantized int8 centroids (stride-16 layout).
+//  3. Assign each vector to its nearest centroid in int8 space (parallel).
+//  4. Allocate and fill per-cluster arrays.
 //
-// Two passes is faster overall than one-pass append because we avoid the
-// repeated reallocation of 64 growing slices (each ending up ~47k vectors).
+// Memory: ~3M * 14 * 4 = 168MB temporary float32 buffer during build.
+// This stage runs unconstrained in the buildivf Docker layer.
 func BuildFromRefs(refsPath string) (*Index, error) {
-	counts, err := countBuckets(refsPath)
-	if err != nil {
-		return nil, fmt.Errorf("count: %w", err)
-	}
-
-	var vecs [Buckets][]int8
-	var labs [Buckets][]byte
-	for b := 0; b < Buckets; b++ {
-		// 16-byte stride per vector — last 2 bytes stay zero so SSE2 can
-		// load each candidate into a single XMM register without masking.
-		vecs[b] = make([]int8, counts[b]*stride)
-		labs[b] = make([]byte, counts[b])
-	}
-
-	var cursors [Buckets]uint32
-	err = streamRefs(refsPath, func(vec []float32, label byte) {
-		var v [Dim]float32
-		copy(v[:], vec)
-		b := Bucket(&v)
-		off := cursors[b] * stride
+	start := time.Now()
+	vectors := make([]float32, 0, 3_500_000*Dim)
+	labels := make([]byte, 0, 3_500_000)
+	err := streamRefs(refsPath, func(vec []float32, label byte) {
 		for i := 0; i < Dim; i++ {
-			vecs[b][int(off)+i] = f32ToI8(v[i])
+			if i < len(vec) {
+				vectors = append(vectors, vec[i])
+			} else {
+				vectors = append(vectors, 0)
+			}
 		}
-		// bytes [off+Dim, off+stride) left at zero by make()
-		labs[b][cursors[b]] = label
-		cursors[b]++
+		labels = append(labels, label)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fill: %w", err)
+		return nil, fmt.Errorf("stream refs: %w", err)
+	}
+	n := len(labels)
+	log.Printf("loaded %d reference vectors in %s", n, time.Since(start))
+
+	// 300 iters × 20 000 batch ≈ 6 M points sampled, ~3× the original budget.
+	// Build-time only — costs seconds in the ivf-builder Docker stage but
+	// shrinks the tail of cluster sizes, which directly reduces worst-case
+	// Search latency at runtime.
+	start = time.Now()
+	centroids := Kmeans(vectors, 300, 20000, 42)
+	log.Printf("kmeans (k=%d) complete in %s", NClusters, time.Since(start))
+
+	start = time.Now()
+	assignments := make([]uint16, n)
+	workers := runtime.NumCPU()
+	chunk := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		lo := w * chunk
+		hi := lo + chunk
+		if hi > n {
+			hi = n
+		}
+		if lo >= hi {
+			continue
+		}
+		wg.Add(1)
+		go func(lo, hi int) {
+			defer wg.Done()
+			for vi := lo; vi < hi; vi++ {
+				var v [Dim]float32
+				copy(v[:], vectors[vi*Dim:vi*Dim+Dim])
+				q := quantize14(&v)
+				assignments[vi] = uint16(nearestClusterI8(&q, centroids))
+			}
+		}(lo, hi)
+	}
+	wg.Wait()
+	log.Printf("assignments (%d workers) complete in %s", workers, time.Since(start))
+
+	var counts [NClusters]uint32
+	for _, c := range assignments {
+		counts[c]++
+	}
+	logClusterDistribution(counts[:])
+
+	var vecs [NClusters][]int8
+	var labs [NClusters][]byte
+	for c := 0; c < NClusters; c++ {
+		vecs[c] = make([]int8, counts[c]*stride)
+		labs[c] = make([]byte, counts[c])
 	}
 
-	return Build(counts, vecs, labs), nil
+	var cursors [NClusters]uint32
+	for vi := 0; vi < n; vi++ {
+		c := assignments[vi]
+		off := cursors[c] * stride
+		for i := 0; i < Dim; i++ {
+			vecs[c][int(off)+i] = f32ToI8(vectors[vi*Dim+i])
+		}
+		labs[c][cursors[c]] = labels[vi]
+		cursors[c]++
+	}
+
+	return Build(centroids, counts, vecs, labs), nil
 }
 
-func countBuckets(path string) ([Buckets]uint32, error) {
-	var counts [Buckets]uint32
-	err := streamRefs(path, func(vec []float32, _ byte) {
-		var v [Dim]float32
-		copy(v[:], vec)
-		counts[Bucket(&v)]++
-	})
-	return counts, err
+// logClusterDistribution prints min / p50 / p99 / max / empty-count over the
+// cluster sizes. A heavy-tail (p99 >> mean) suggests bumping iters or NClusters;
+// many empties suggest reducing NClusters.
+func logClusterDistribution(counts []uint32) {
+	sorted := make([]uint32, len(counts))
+	copy(sorted, counts)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	var total uint64
+	for _, c := range sorted {
+		total += uint64(c)
+	}
+	mean := total / uint64(len(sorted))
+
+	var empty int
+	for _, c := range sorted {
+		if c == 0 {
+			empty++
+		} else {
+			break
+		}
+	}
+	p50 := sorted[len(sorted)/2]
+	p99 := sorted[(len(sorted)*99)/100]
+	max := sorted[len(sorted)-1]
+	log.Printf("cluster sizes: min=%d empty=%d mean=%d p50=%d p99=%d max=%d (over %d clusters)",
+		sorted[0], empty, mean, p50, p99, max, len(sorted))
 }
 
 // streamRefs decodes the gzipped JSON array of {"vector":[...], "label":"..."}

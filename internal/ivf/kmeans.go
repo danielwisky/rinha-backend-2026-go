@@ -5,13 +5,13 @@ import (
 	"unsafe"
 )
 
-// NClusters is the target k for the IVF k-means partition.
+// NClusters is the k for the IVF k-means partition.
 //
 // 2048 matches the top public submissions (e.g. RonieNeubauer/rinha2026).
 // At 3M reference vectors, mean cluster size is ~1500 — one cluster's
 // scan (~24KB int8 data) fits comfortably in L1, and the centroid table
 // itself (NClusters * stride = 32KB) lives in L1 too.
-const NClusters = 256
+const NClusters = 2048
 
 // Kmeans runs mini-batch k-means on float32 reference vectors and returns
 // NClusters quantized int8 centroids in stride-16 layout.
