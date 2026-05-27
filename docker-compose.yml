@@ -11,53 +11,61 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
+          cpus: "0.20"
           memory: "10MB"
     networks:
       - backend
 
   api1:
-    image: danielwisky/rinha-2026-api:1.0.0
+    image: danielwisky/rinha-2026-api:1.1.0
     platform: linux/amd64
     environment:
       IVF_PATH: /app/resources/ivf.bin
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
+      GOMEMLIMIT: "150MiB"
+    ulimits:
+      memlock: -1
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.40"
           memory: "170MB"
     networks:
       - backend
 
   api2:
-    image: danielwisky/rinha-2026-api:1.0.0
+    image: danielwisky/rinha-2026-api:1.1.0
     platform: linux/amd64
     environment:
       IVF_PATH: /app/resources/ivf.bin
       RESOURCES_PATH: /app/resources
       GOMAXPROCS: "1"
       GOGC: "200"
+      GOMEMLIMIT: "150MiB"
+    ulimits:
+      memlock: -1
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.40"
           memory: "170MB"
     networks:
       - backend
 
-# Memory budget (IVF int8, 43MB on disk, mmap-shared):
+# Memory budget (IVF int8, ~50MB on disk, mmap-shared between api1 and api2
+# via kernel page cache + mlock'd to prevent eviction):
 # nginx:    10 MB
 # api1:    170 MB → mmap'd index pages + go runtime + slack
 # api2:    170 MB → same; physical RAM shared via kernel page cache
 # Total:   350 MB ✓
 #
-# CPU budget:
-# nginx:    0.05
-# api1:     0.475
-# api2:     0.475
+# CPU budget (sweet spot found via sweeping on local k6 — nginx at 0.05
+# was throttling the burst at 900 RPS; sub-3ms p99 only appears at 0.20):
+# nginx:    0.20
+# api1:     0.40
+# api2:     0.40
 # Total:    1.00 ✓
 
 networks:
