@@ -5,6 +5,7 @@ package ivf
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -44,6 +45,14 @@ func LoadMmap(path string) (*Index, error) {
 		sink ^= data[i]
 	}
 	_ = sink
+
+	// Pin the pages so the kernel never evicts them under RSS pressure. Warning-
+	// only on failure — typically requires RLIMIT_MEMLOCK to be raised (see
+	// `ulimits: memlock: -1` in docker-compose.yml). Without mlock the
+	// MADV_WILLNEED + page-touch above is best-effort.
+	if err := unix.Mlock(data); err != nil {
+		log.Printf("ivf: mlock failed (continuing without it): %v", err)
+	}
 
 	if binary.LittleEndian.Uint32(data[0:]) != magic {
 		_ = unix.Munmap(data)

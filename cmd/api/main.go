@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -31,7 +32,8 @@ func main() {
 	}
 	log.Printf("ivf index mmap'd in %s", time.Since(start))
 
-	var vs store.VectorStore = &ivf.Store{Idx: idx}
+	ivfStore := &ivf.Store{Idx: idx}
+	var vs store.VectorStore = ivfStore
 	h := handler.New(vz, vs)
 
 	srv := &fasthttp.Server{
@@ -53,10 +55,38 @@ func main() {
 		}()
 	}
 
+	// Warmup before announcing /ready=200: walk Search over synthetic queries
+	// to fault in pages, fill L1/L2, and let sonic / fasthttp warm their own
+	// state when the first real burst arrives. The k6 health check has 60 s
+	// margin (20 retries × 3 s) so this is well within budget.
+	go func() {
+		warmup(idx)
+		ivfStore.MarkReady()
+	}()
+
 	log.Printf("api listening on %s", listenAddr)
 	if err := srv.ListenAndServe(listenAddr); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+// warmup runs ~1000 synthetic Search calls to fault in mmap pages, prime CPU
+// caches, and trigger Go runtime warmup before /ready signals OK.
+func warmup(idx *ivf.Index) {
+	start := time.Now()
+	rng := rand.New(rand.NewSource(1))
+	var q [ivf.Dim]float32
+	var sink uint8
+	const n = 1000
+	for i := 0; i < n; i++ {
+		for j := 0; j < ivf.Dim; j++ {
+			q[j] = rng.Float32()*2 - 1
+		}
+		top := idx.Search(&q)
+		sink ^= top[0]
+	}
+	_ = sink
+	log.Printf("warmup: %d queries in %s", n, time.Since(start))
 }
 
 func envOr(k, fallback string) string {

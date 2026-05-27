@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -155,17 +156,21 @@ func f32ToI8(f float32) int8 {
 	return int8(q)
 }
 
-type Store struct{ Idx *Index }
+type Store struct {
+	Idx   *Index
+	ready atomic.Bool
+}
 
-func (s *Store) Ready() bool { return s.Idx != nil }
+// Ready reports whether the store has finished warmup. Set via MarkReady.
+func (s *Store) Ready() bool { return s.ready.Load() }
 
-func (s *Store) Search(v [Dim]float32) ([]uint8, error) {
-	top := s.Idx.Search(&v)
-	out := make([]uint8, K)
-	for i := 0; i < K; i++ {
-		out[i] = top[i]
-	}
-	return out, nil
+// MarkReady flips the readiness flag; call after warmup has completed.
+func (s *Store) MarkReady() { s.ready.Store(true) }
+
+// Search returns the top-K labels as a fixed-size array — no heap alloc on
+// the hot path. The caller deals with the array directly.
+func (s *Store) Search(v [Dim]float32) ([K]uint8, error) {
+	return s.Idx.Search(&v), nil
 }
 
 func Build(centroids []int8, counts [NClusters]uint32, vecs [NClusters][]int8, labs [NClusters][]byte) *Index {
