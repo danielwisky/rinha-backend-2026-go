@@ -11,7 +11,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: "10MB"
     networks:
       - backend
@@ -32,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: "170MB"
     networks:
       - backend
@@ -53,7 +53,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: "170MB"
     networks:
       - backend
@@ -64,10 +64,11 @@ services:
 # api2:    170 MB → same; physical RAM shared via kernel page cache
 # Total:   350 MB ✓
 #
-# CPU budget (rebalanced to give nginx headroom at 900 RPS):
-# nginx:    0.10  ↑ from 0.05 — single worker_process was getting ~55µs/req
-# api1:     0.45  ↓ from 0.475 (search hot path uses <0.1 CPU after IVF v2)
-# api2:     0.45  ↓ from 0.475
+# CPU budget (rebalanced — nginx was throttled under burst at 0.05).
+# Sweet spot found by sweeping: 0.10→0.15→0.20→0.30; 0.20 wins.
+# nginx:    0.20  ↑ from 0.05 (k6 ramp to 900 RPS saturates a single worker)
+# api1:     0.40  ↓ from 0.475 (Search compute uses <0.1 CPU after IVF v2)
+# api2:     0.40  ↓ from 0.475
 # Total:    1.00 ✓
 #
 # memlock unlimited (ulimits) so unix.Mlock can pin the IVF mmap pages and

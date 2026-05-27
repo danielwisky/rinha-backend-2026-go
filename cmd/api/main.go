@@ -46,6 +46,16 @@ func main() {
 		TCPKeepalive:          true,
 		NoDefaultServerHeader: true,
 		NoDefaultDate:         true,
+		// Request payloads are ~250-400 bytes; response bodies are ~36 bytes
+		// (precomputed). Tight buffers keep the per-conn footprint small so
+		// more connections fit in cache. Concurrency=4096 covers the ramp to
+		// 900 RPS even with momentary backlog. MaxConnsPerIP=0 is required
+		// because all k6 traffic comes from a single loopback address.
+		ReadBufferSize:     1024,
+		WriteBufferSize:    512,
+		Concurrency:        4096,
+		MaxConnsPerIP:      0,
+		MaxRequestsPerConn: 0,
 	}
 
 	if os.Getenv("PPROF") == "1" {

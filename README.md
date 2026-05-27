@@ -1,6 +1,18 @@
 # rinha-backend-2026-go
 
-Solução para a **Rinha de Backend 2026** — serviço de detecção de fraude em tempo real usando k-NN com índice **IVF (inverted-file) quantizado em int8**, *mmap* em processo. Foco em throughput máximo dentro de 1 vCPU / 350 MB RAM.
+Solução para a **Rinha de Backend 2026** — detecção de fraude em tempo real via k-NN com índice **IVF (inverted-file) k-means + multi-probe, quantizado em int8**, *mmap* em processo. Foco em throughput máximo dentro de 1 vCPU / 350 MB RAM.
+
+## Score
+
+Testado localmente com o k6 oficial (ramp 1→900 RPS em 120 s, 54 100 requisições):
+
+| Métrica | Valor |
+|---|---|
+| `p99` | ~2,4 ms |
+| `p99_score` | ~2600 |
+| `detection_score` | ~1600 |
+| **`final_score`** | **~4200** |
+| `failure_rate` | 0,23% |
 
 ## O que faz?
 
@@ -20,29 +32,35 @@ Não há serviço de store separado — o índice é carregado in-process via `m
 
 | Componente | Papel | Limite de recursos |
 |---|---|---|
-| **nginx** | Load balancer round-robin entre api1 e api2, keep-alive 256 | 0.05 CPU / 10 MB |
-| **api1 / api2** | Vetorização + busca k-NN no IVF mmap | 0.475 CPU / 170 MB cada |
-| **Total** |  | 1.00 CPU / 350 MB |
+| **nginx** | Load balancer round-robin entre api1 e api2, keep-alive 256 | 0,20 CPU / 10 MB |
+| **api1 / api2** | Vetorização + busca k-NN no IVF mmap | 0,40 CPU / 170 MB cada |
+| **Total** |  | 1,00 CPU / 350 MB |
 
-> Memória: as 170 MB por api são virtuais. O índice (~43 MB em disco, int8) entra na RSS de cada processo via mmap mas as **páginas físicas são compartilhadas** entre api1 e api2.
+> Memória: as 170 MB por api são virtuais. O índice (~50 MB em disco, int8) entra na RSS de cada processo via mmap mas as **páginas físicas são compartilhadas** entre api1 e api2 (mesmo inode na imagem) e ficam **`mlock`'d** para que o kernel não evicte sob pressão.
 
 ### API (`cmd/api`)
 
-- HTTP server [fasthttp](https://github.com/valyala/fasthttp), JSON com [sonic](https://github.com/bytedance/sonic)
-- Converte o payload de entrada em um vetor de 14 dimensões (`internal/vectorize`)
-- Roteia o vetor para um bucket do IVF e faz busca exata dentro do bucket (`internal/ivf`)
-- Pool de `domain.Request` + tabela pré-computada das 12 respostas possíveis (`approved × k=0..5`) no hot path
+- HTTP server [fasthttp](https://github.com/valyala/fasthttp) com buffers tunados (Concurrency=4096, ReadBuf=1024)
+- JSON com [sonic.ConfigFastest](https://github.com/bytedance/sonic) — pula validação UTF-8 e ordenação de chaves
+- Converte o payload em vetor de 14 dimensões (`internal/vectorize`)
+- Roteia o vetor para os top-`NProbe` clusters do IVF e faz busca exata dentro deles (`internal/ivf`)
+- Pool de `domain.Request` (com `KnownMerchants` pré-alocado em cap=8) + tabela pré-computada das 12 respostas possíveis (`approved × k=0..5`) no hot path
+- **Warmup**: antes de marcar `/ready=200`, executa ~1 000 buscas sintéticas para faultar páginas mmap e aquecer L1/L2 + sonic JIT
 
 ### Índice IVF (`internal/ivf`)
 
-- **64 buckets**, particionados por 6 features binárias (last_tx ausente, online, card_present, unknown_merchant, PM, weekend) — escolhidas para espalhar o dataset de ~3 M vetores e manter o query no mesmo bucket dos vizinhos relevantes
-- **Quantização int8** (escala 127): cada vetor ocupa 14 bytes vs 56 em float32
-- Busca exata dentro do bucket: L2² desenrolado em Dim=14 — o compilador vetoriza para SSE/AVX no amd64
+- **2048 clusters k-means** (mini-batch, Sculley 2010 — 300 iters × 20 000 batch)
+- **Multi-probe**: a query é roteada para os `NProbe=4` clusters mais próximos do centroide, e o top-K=5 final é tirado da união
+- **Quantização int8** (escala 127): cada vetor ocupa 16 bytes (14 dims + 2 padding) vs 56 em float32
+- **Distância**: L2² em assembly SSE2 (`internal/ivf/dist_amd64.s`) — ~6 instruções por vetor, sem branch
 - Top-K=5 via insertion-sort sobre array fixo
+- `mlock`ado em RAM após `mmap` (com fallback warning-only se `RLIMIT_MEMLOCK` não permitir)
+
+Trade-off de busca: `2048` distâncias contra centroides + `4 × ~1500` distâncias contra vetores de cluster = **~8 000 distâncias por query** (vs centenas de milhares de uma varredura linear).
 
 ### Build do índice
 
-O `Dockerfile.api` faz o build do índice **dentro da própria imagem**, em estágio separado, para evitar re-rodar o build (~10 s) a cada edição em `cmd/api`:
+O `Dockerfile.api` faz o build do índice **dentro da própria imagem**, em estágio separado, para evitar re-rodar o build (~2 min) a cada edição em `cmd/api`:
 
 1. Compila `cmd/buildivf` em um estágio isolado
 2. Roda `buildivf -refs references.json.gz -out ivf.bin` em outro estágio (cacheado pelo hash do binário + dados de referência)
@@ -64,7 +82,7 @@ O `Dockerfile.api` faz o build do índice **dentro da própria imagem**, em est�
 | 9 | Terminal online (0/1) |
 | 10 | Cartão presente (0/1) |
 | 11 | Estabelecimento desconhecido (0/1) |
-| 12 | Risco do MCC |
+| 12 | Risco do MCC (lookup denso `[10000]float32`) |
 | 13 | Valor médio do estabelecimento (normalizado) |
 
 ### Lógica de score
@@ -97,7 +115,7 @@ approved    = fraud_score < 0.6   (≤ 2 vizinhos fraudulentos)
 
 ### `GET /ready`
 
-Retorna `200 OK` quando o índice IVF foi mapeado e está pronto, `503` caso contrário.
+Retorna `200 OK` somente após o warmup ter completado (índice mmap'd + ~1 000 buscas sintéticas executadas). Retorna `503` enquanto o warmup ainda está em andamento.
 
 ## Como rodar
 
@@ -113,6 +131,14 @@ docker compose up --build
 ```
 
 A API ficará disponível em `http://localhost:9999`.
+
+### Rodar o teste oficial (k6)
+
+```bash
+# repo de testes em paralelo a este
+cd ../rinha-de-backend-2026
+./run.sh
+```
 
 ### Desenvolvimento local (sem Docker)
 
@@ -132,6 +158,8 @@ RESOURCES_PATH=./resources IVF_PATH=./resources/ivf.bin go run ./cmd/api
 go test ./...
 ```
 
+Inclui um *sanity test* (`TestSearchMatchesBruteForce`) que constrói um índice pequeno e mede recall@5 contra brute-force int8 — protege contra regressões na busca multi-probe.
+
 ## Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
@@ -140,22 +168,32 @@ go test ./...
 | `RESOURCES_PATH` | `/app/resources` | Diretório com `normalization.json` e `mcc_risk.json` |
 | `LISTEN_ADDR` | `:8080` | Endereço de escuta da API |
 | `GOMAXPROCS` | `1` | Limita o runtime Go ao orçamento de CPU |
-| `GOGC` | `200` | Reduz frequência do GC (índice é mmap, alocação no hot path é mínima) |
+| `GOGC` | `200` | Reduz frequência do GC (alocação no hot path é mínima) |
+| `GOMEMLIMIT` | `150MiB` | Soft heap limit (pause antes do hard limit do container) |
+| `PPROF` | (off) | Se `=1`, abre `/debug/pprof/...` em `:6060` |
 
 ## Stack
 
 - **Go 1.24** (pure Go, sem CGO)
 - [fasthttp](https://github.com/valyala/fasthttp) — HTTP server de alta performance
-- [sonic](https://github.com/bytedance/sonic) — JSON marshal/unmarshal otimizado
-- IVF + L2² em int8 — busca k-NN exata dentro do bucket, implementação própria em `internal/ivf`
+- [sonic.ConfigFastest](https://github.com/bytedance/sonic) — JSON ultra-rápido
+- IVF k-means + multi-probe + SSE2 — implementação própria em `internal/ivf` (~700 linhas Go)
 - **Nginx 1.25** — load balancer
 - **Docker Compose** — orquestração local
+
+## Histórico de otimizações
+
+| Versão | Score | p99 | Mudança |
+|---|---|---|---|
+| v1 (binary-bucket IVF, 256 buckets) | 1839 | 661 ms | baseline pré-otimização |
+| v2 base (k-means IVF 2048 + multi-probe NProbe=4) | 2917 | 48 ms | troca do particionamento + warmup + mlock + sonic fastest + CPU rebalance (nginx 0,10) |
+| v3 (CPU sweet spot) | **~4200** | **~2,4 ms** | nginx 0,20 / api 0,40 — single nginx worker estava saturando a 0,10 sob burst |
 
 ## Tradeoffs
 
 | Dá up em | Para ganhar |
 |---|---|
-| Recall máximo (k-NN global) | Latência: exato-dentro-do-bucket evita travessia de grafo / CGO |
-| Flexibilidade de modelo | Cache-friendliness: um bucket cabe em L2/L3, busca é memory-bandwidth bound |
-| Atualização online do índice | Memória: índice é imutável, mmap compartilhado entre os 2 processos |
-| Generalidade (HNSW seria mais robusto) | Simplicidade: pure Go, ~300 linhas, sem dependências nativas |
+| Recall máximo (k-NN exato global) | Latência: multi-probe sobre k-means com quantização int8, sem travessia de grafo nem CGO |
+| Flexibilidade de modelo | Cache-friendliness: centroides + cluster top-4 cabem em L1/L2, busca é memory-bandwidth bound |
+| Atualização online do índice | Memória: índice é imutável, mmap compartilhado entre os 2 processos, `mlock`ado |
+| Generalidade (HNSW seria mais robusto) | Simplicidade: pure Go, sem dependências nativas |
